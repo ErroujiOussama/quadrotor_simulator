@@ -1,5 +1,5 @@
 /**
- * Control Panel for PID Tuning and Simulation Parameters
+ * Control Panel — PID tuning, setpoints, simulation speed, drone parameters.
  */
 
 import React from 'react';
@@ -11,15 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
-import { 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  Info, 
-  Settings, 
-  Target,
-  Plane
-} from 'lucide-react';
+import { Play, Pause, RotateCcw, Info, Settings, Target, Plane, Download } from 'lucide-react';
 import { ControllerConfig, SetPoints, SimulationConfig } from '@/lib/simulation/DroneSimulator';
 import { DroneParameters } from '@/lib/physics/DroneModel';
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip';
@@ -33,167 +25,114 @@ interface ControlPanelProps {
   onStart: () => void;
   onPause: () => void;
   onReset: () => void;
-  onControllerConfigChange: (config: Partial<ControllerConfig>) => void;
-  onSetpointsChange: (setpoints: Partial<SetPoints>) => void;
-  onDroneParamsChange: (params: Partial<DroneParameters>) => void;
-  onSimulationConfigChange: (config: Partial<SimulationConfig>) => void;
+  onExport: () => void;
+  onControllerConfigChange: (c: Partial<ControllerConfig>) => void;
+  onSetpointsChange: (s: Partial<SetPoints>) => void;
+  onDroneParamsChange: (p: Partial<DroneParameters>) => void;
+  onSimulationConfigChange: (c: Partial<SimulationConfig>) => void;
 }
 
-const InfoTooltip: React.FC<{ content: string }> = ({ content }) => (
+const InfoTip: React.FC<{ text: string }> = ({ text }) => (
   <TooltipProvider>
     <Tooltip>
       <TooltipTrigger asChild>
-        <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+        <Info className="h-3 w-3 text-muted-foreground cursor-help shrink-0" />
       </TooltipTrigger>
-      <TooltipContent>
-        <p className="max-w-xs text-xs">{content}</p>
-      </TooltipContent>
+      <TooltipContent><p className="max-w-xs text-xs">{text}</p></TooltipContent>
     </Tooltip>
   </TooltipProvider>
 );
 
-export const ControlPanel: React.FC<ControlPanelProps> = ({
-  isRunning,
-  controllerConfig,
-  setpoints,
-  droneParams,
-  simulationConfig,
-  onStart,
-  onPause,
-  onReset,
-  onControllerConfigChange,
-  onSetpointsChange,
-  onDroneParamsChange,
-  onSimulationConfigChange
-}) => {
-  const updateControllerGain = (
-    controller: keyof ControllerConfig,
-    axis: string | null,
-    gain: 'kp' | 'ki' | 'kd',
-    value: number
-  ) => {
-    if (controller === 'altitude') {
-      onControllerConfigChange({
-        altitude: { ...controllerConfig.altitude, [gain]: value }
-      });
-    } else if (controller === 'attitude' && axis) {
-      onControllerConfigChange({
-        attitude: {
-          ...controllerConfig.attitude,
-          [axis]: { ...controllerConfig.attitude[axis as keyof typeof controllerConfig.attitude], [gain]: value }
-        }
-      });
-    } else if (controller === 'position' && axis) {
-      const axisConfig = controllerConfig.position[axis as keyof typeof controllerConfig.position];
-      if ('outer' in axisConfig && 'inner' in axisConfig) {
-        // For cascaded controllers, we'll update outer loop gains
-        onControllerConfigChange({
-          position: {
-            ...controllerConfig.position,
-            [axis]: {
-              ...axisConfig,
-              outer: { ...axisConfig.outer, [gain]: value }
-            }
-          }
-        });
-      }
-    }
-  };
+interface GainRowProps {
+  gain: 'kp' | 'ki' | 'kd';
+  value: number;
+  max: number;
+  disabled?: boolean;
+  onChange: (v: number) => void;
+}
+const GainRow: React.FC<GainRowProps> = ({ gain, value, max, disabled, onChange }) => (
+  <div className="space-y-1">
+    <div className="flex items-center justify-between">
+      <Label className="text-xs uppercase font-mono">{gain}</Label>
+      <span className="text-xs font-mono text-muted-foreground">{value.toFixed(2)}</span>
+    </div>
+    <Slider value={[value]} onValueChange={([v]) => onChange(v)} min={0} max={max} step={0.01} disabled={disabled} />
+  </div>
+);
 
-  const toggleController = (controller: keyof ControllerConfig, axis?: string) => {
-    if (controller === 'altitude') {
-      onControllerConfigChange({
-        altitude: { ...controllerConfig.altitude, enabled: !controllerConfig.altitude.enabled }
-      });
-    } else if (controller === 'attitude' && axis) {
-      onControllerConfigChange({
-        attitude: {
-          ...controllerConfig.attitude,
-          [axis]: { 
-            ...controllerConfig.attitude[axis as keyof typeof controllerConfig.attitude], 
-            enabled: !controllerConfig.attitude[axis as keyof typeof controllerConfig.attitude].enabled 
-          }
-        }
-      });
-    } else if (controller === 'position' && axis) {
-      const axisConfig = controllerConfig.position[axis as keyof typeof controllerConfig.position];
-      onControllerConfigChange({
-        position: {
-          ...controllerConfig.position,
-          [axis]: { ...axisConfig, enabled: !axisConfig.enabled }
-        }
-      });
-    }
-  };
+export const ControlPanel: React.FC<ControlPanelProps> = ({
+  isRunning, controllerConfig, setpoints, droneParams, simulationConfig,
+  onStart, onPause, onReset, onExport,
+  onControllerConfigChange, onSetpointsChange, onDroneParamsChange, onSimulationConfigChange,
+}) => {
+  const updateAltitude = (key: 'kp' | 'ki' | 'kd', v: number) =>
+    onControllerConfigChange({ altitude: { ...controllerConfig.altitude, [key]: v } });
+
+  const updateAttitude = (axis: 'roll' | 'pitch' | 'yaw', key: 'kp' | 'ki' | 'kd', v: number) =>
+    onControllerConfigChange({
+      attitude: { ...controllerConfig.attitude, [axis]: { ...controllerConfig.attitude[axis], [key]: v } },
+    });
+
+  const updatePositionOuter = (axis: 'x' | 'y', key: 'kp' | 'ki' | 'kd', v: number) =>
+    onControllerConfigChange({
+      position: {
+        ...controllerConfig.position,
+        [axis]: { ...controllerConfig.position[axis], outer: { ...controllerConfig.position[axis].outer, [key]: v } },
+      },
+    });
+
+  const updatePositionInner = (axis: 'x' | 'y', key: 'kp' | 'ki' | 'kd', v: number) =>
+    onControllerConfigChange({
+      position: {
+        ...controllerConfig.position,
+        [axis]: { ...controllerConfig.position[axis], inner: { ...controllerConfig.position[axis].inner, [key]: v } },
+      },
+    });
 
   return (
-    <div className="w-full space-y-4">
-      {/* Simulation Controls */}
+    <div className="space-y-4">
+      {/* Simulation control */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Settings className="h-5 w-5" />
-            Simulation Control
+          <CardTitle className="text-base flex items-center gap-2">
+            <Settings className="h-4 w-4" /> Simulation
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Button
-              variant={isRunning ? "secondary" : "default"}
-              onClick={isRunning ? onPause : onStart}
-              className="flex items-center gap-2"
-            >
-              {isRunning ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              {isRunning ? 'Pause' : 'Start'}
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <Button size="sm" className="flex-1" variant={isRunning ? 'secondary' : 'default'}
+              onClick={isRunning ? onPause : onStart}>
+              {isRunning ? <><Pause className="h-3 w-3 mr-1" />Pause</> : <><Play className="h-3 w-3 mr-1" />Start</>}
             </Button>
-            <Button variant="outline" onClick={onReset} className="flex items-center gap-2">
-              <RotateCcw className="h-4 w-4" />
-              Reset
+            <Button size="sm" variant="outline" onClick={onReset}>
+              <RotateCcw className="h-3 w-3 mr-1" /> Reset
             </Button>
-            <Badge variant="secondary" className="ml-auto">
-              {simulationConfig.realTimeMultiplier}x Speed
-            </Badge>
+            <Button size="sm" variant="outline" onClick={onExport} title="Export CSV">
+              <Download className="h-3 w-3" />
+            </Button>
           </div>
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Label className="text-xs">Physics</Label>
-                <InfoTooltip content="Enable/disable physics simulation" />
-              </div>
-              <Switch
-                checked={simulationConfig.enablePhysics}
-                onCheckedChange={(enabled) => onSimulationConfigChange({ enablePhysics: enabled })}
-              />
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-1"><Label className="text-xs">Physics</Label><InfoTip text="Toggle physics integration" /></div>
+              <Switch checked={simulationConfig.enablePhysics} onCheckedChange={v => onSimulationConfigChange({ enablePhysics: v })} />
             </div>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <Label className="text-xs">Control</Label>
-                <InfoTooltip content="Enable/disable automatic control systems" />
-              </div>
-              <Switch
-                checked={simulationConfig.enableControl}
-                onCheckedChange={(enabled) => onSimulationConfigChange({ enableControl: enabled })}
-              />
+            <div className="space-y-1">
+              <div className="flex items-center gap-1"><Label className="text-xs">Control</Label><InfoTip text="Toggle PID controllers" /></div>
+              <Switch checked={simulationConfig.enableControl} onCheckedChange={v => onSimulationConfigChange({ enableControl: v })} />
             </div>
           </div>
 
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">Simulation Speed</Label>
-              <InfoTooltip content="Adjust simulation playback speed" />
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs">Sim Speed</Label>
+              <Badge variant="outline" className="text-xs font-mono">{simulationConfig.realTimeMultiplier.toFixed(1)}×</Badge>
             </div>
             <Slider
               value={[simulationConfig.realTimeMultiplier]}
-              onValueChange={([value]) => onSimulationConfigChange({ realTimeMultiplier: value })}
-              min={0.1}
-              max={5}
-              step={0.1}
-              className="w-full"
+              onValueChange={([v]) => onSimulationConfigChange({ realTimeMultiplier: v })}
+              min={0.1} max={5} step={0.1}
             />
-            <div className="text-xs text-muted-foreground">
-              {simulationConfig.realTimeMultiplier.toFixed(1)}x
-            </div>
           </div>
         </CardContent>
       </Card>
@@ -201,268 +140,155 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       {/* Setpoints */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Target className="h-5 w-5" />
-            Setpoints
+          <CardTitle className="text-base flex items-center gap-2">
+            <Target className="h-4 w-4" /> Setpoints
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <Label className="text-xs">X Position (m)</Label>
-              <Input
-                type="number"
-                value={setpoints.position.x}
-                onChange={(e) => onSetpointsChange({
-                  position: { ...setpoints.position, x: parseFloat(e.target.value) || 0 }
-                })}
-                step="0.1"
-                className="h-8 text-xs"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label className="text-xs">Y Position (m)</Label>
-              <Input
-                type="number"
-                value={setpoints.position.y}
-                onChange={(e) => onSetpointsChange({
-                  position: { ...setpoints.position, y: parseFloat(e.target.value) || 0 }
-                })}
-                step="0.1"
-                className="h-8 text-xs"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label className="text-xs">Altitude (m)</Label>
-              <Input
-                type="number"
-                value={setpoints.position.z}
-                onChange={(e) => onSetpointsChange({
-                  position: { ...setpoints.position, z: parseFloat(e.target.value) || 0 }
-                })}
-                step="0.1"
-                min="0"
-                className="h-8 text-xs"
-              />
-            </div>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-3 gap-2">
+            {(['x', 'y', 'z'] as const).map(ax => (
+              <div key={ax} className="space-y-1">
+                <Label className="text-xs">{ax === 'z' ? 'Alt' : ax.toUpperCase()} (m)</Label>
+                <Input
+                  type="number" step="0.5" className="h-7 text-xs"
+                  value={setpoints.position[ax]}
+                  onChange={e => onSetpointsChange({ position: { ...setpoints.position, [ax]: parseFloat(e.target.value) || 0 } })}
+                />
+              </div>
+            ))}
           </div>
-          
-          <div className="space-y-2">
-            <Label className="text-xs">Yaw Angle (rad)</Label>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs">Yaw</Label>
+              <span className="text-xs text-muted-foreground font-mono">
+                {setpoints.attitude.yaw.toFixed(2)} rad ({(setpoints.attitude.yaw * 180 / Math.PI).toFixed(0)}°)
+              </span>
+            </div>
             <Slider
               value={[setpoints.attitude.yaw]}
-              onValueChange={([value]) => onSetpointsChange({
-                attitude: { ...setpoints.attitude, yaw: value }
-              })}
-              min={-Math.PI}
-              max={Math.PI}
-              step={0.1}
-              className="w-full"
+              onValueChange={([v]) => onSetpointsChange({ attitude: { ...setpoints.attitude, yaw: v } })}
+              min={-Math.PI} max={Math.PI} step={0.05}
             />
-            <div className="text-xs text-muted-foreground">
-              {setpoints.attitude.yaw.toFixed(2)} rad ({(setpoints.attitude.yaw * 180 / Math.PI).toFixed(0)}°)
-            </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Altitude Control */}
+      {/* Altitude PID */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Plane className="h-5 w-5" />
-            Altitude Control
-            <Switch
-              checked={controllerConfig.altitude.enabled}
-              onCheckedChange={() => toggleController('altitude')}
-            />
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Plane className="h-4 w-4" /> Altitude PID
+            <Switch className="ml-auto" checked={controllerConfig.altitude.enabled}
+              onCheckedChange={v => onControllerConfigChange({ altitude: { ...controllerConfig.altitude, enabled: v } })} />
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {['kp', 'ki', 'kd'].map((gain) => {
-            const value = controllerConfig.altitude[gain as keyof typeof controllerConfig.altitude] as number;
-            const maxValues = { kp: 20, ki: 5, kd: 10 };
-            
-            return (
-              <div key={gain} className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Label className="text-xs capitalize">{gain}</Label>
-                  <InfoTooltip content={
-                    gain === 'kp' ? 'Proportional gain - responds to current error' :
-                    gain === 'ki' ? 'Integral gain - eliminates steady-state error' :
-                    'Derivative gain - reduces overshoot and oscillation'
-                  } />
-                </div>
-                <Slider
-                  value={[value]}
-                  onValueChange={([newValue]) => updateControllerGain('altitude', null, gain as any, newValue)}
-                  min={0}
-                  max={maxValues[gain as keyof typeof maxValues]}
-                  step={0.1}
-                  className="w-full"
-                  disabled={!controllerConfig.altitude.enabled}
-                />
-                <div className="text-xs text-muted-foreground">{value.toFixed(1)}</div>
-              </div>
-            );
-          })}
+        <CardContent className="space-y-3">
+          {(['kp', 'ki', 'kd'] as const).map(g => (
+            <GainRow key={g} gain={g} value={controllerConfig.altitude[g]}
+              max={{ kp: 20, ki: 5, kd: 10 }[g]} disabled={!controllerConfig.altitude.enabled}
+              onChange={v => updateAltitude(g, v)} />
+          ))}
         </CardContent>
       </Card>
 
-      {/* Attitude Control */}
+      {/* Attitude PID */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Attitude Control</CardTitle>
+          <CardTitle className="text-sm">Attitude PID</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {['roll', 'pitch', 'yaw'].map((axis) => {
-            const config = controllerConfig.attitude[axis as keyof typeof controllerConfig.attitude];
-            
+          {(['roll', 'pitch', 'yaw'] as const).map(axis => {
+            const cfg = controllerConfig.attitude[axis];
             return (
-              <div key={axis} className="space-y-3">
+              <div key={axis} className="space-y-2">
                 <div className="flex items-center gap-2">
                   <Label className="text-sm capitalize font-medium">{axis}</Label>
-                  <Switch
-                    checked={config.enabled}
-                    onCheckedChange={() => toggleController('attitude', axis)}
-                  />
+                  <Switch checked={cfg.enabled}
+                    onCheckedChange={v => onControllerConfigChange({ attitude: { ...controllerConfig.attitude, [axis]: { ...cfg, enabled: v } } })} />
                 </div>
-                
-                <div className="grid grid-cols-3 gap-3">
-                  {['kp', 'ki', 'kd'].map((gain) => {
-                    const value = config[gain as keyof typeof config] as number;
-                    const maxValues = { kp: 15, ki: 2, kd: 5 };
-                    
-                    return (
-                      <div key={gain} className="space-y-1">
-                        <Label className="text-xs capitalize">{gain}</Label>
-                        <Slider
-                          value={[value]}
-                          onValueChange={([newValue]) => updateControllerGain('attitude', axis, gain as any, newValue)}
-                          min={0}
-                          max={maxValues[gain as keyof typeof maxValues]}
-                          step={0.1}
-                          className="w-full"
-                          disabled={!config.enabled}
-                        />
-                        <div className="text-xs text-muted-foreground">{value.toFixed(1)}</div>
-                      </div>
-                    );
-                  })}
+                <div className="grid grid-cols-3 gap-2">
+                  {(['kp', 'ki', 'kd'] as const).map(g => (
+                    <GainRow key={g} gain={g} value={cfg[g]}
+                      max={{ kp: 15, ki: 2, kd: 5 }[g]} disabled={!cfg.enabled}
+                      onChange={v => updateAttitude(axis, g, v)} />
+                  ))}
                 </div>
-                
-                {axis !== 'yaw' && <Separator className="my-2" />}
+                {axis !== 'yaw' && <Separator />}
               </div>
             );
           })}
         </CardContent>
       </Card>
 
-      {/* Position Control */}
+      {/* Position PID — both outer and inner loops */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Position Control</CardTitle>
+          <CardTitle className="text-sm">Position PID (Cascaded)</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {['x', 'y'].map((axis) => {
-            const config = controllerConfig.position[axis as keyof typeof controllerConfig.position];
-            
+          {(['x', 'y'] as const).map(axis => {
+            const cfg = controllerConfig.position[axis];
             return (
               <div key={axis} className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Label className="text-sm capitalize font-medium">{axis.toUpperCase()} Position</Label>
-                  <Switch
-                    checked={config.enabled}
-                    onCheckedChange={() => toggleController('position', axis)}
-                  />
+                  <Label className="text-sm font-medium">{axis.toUpperCase()} Axis</Label>
+                  <Switch checked={cfg.enabled}
+                    onCheckedChange={v => onControllerConfigChange({ position: { ...controllerConfig.position, [axis]: { ...cfg, enabled: v } } })} />
                 </div>
-                
-                <div className="space-y-2">
-                  <Label className="text-xs">Outer Loop (Position → Velocity)</Label>
-                  <div className="grid grid-cols-3 gap-3">
-                    {['kp', 'ki', 'kd'].map((gain) => {
-                      const value = config.outer[gain as keyof typeof config.outer] as number;
-                      const maxValues = { kp: 5, ki: 1, kd: 2 };
-                      
-                      return (
-                        <div key={gain} className="space-y-1">
-                          <Label className="text-xs capitalize">{gain}</Label>
-                          <Slider
-                            value={[value]}
-                            onValueChange={([newValue]) => updateControllerGain('position', axis, gain as any, newValue)}
-                            min={0}
-                            max={maxValues[gain as keyof typeof maxValues]}
-                            step={0.1}
-                            className="w-full"
-                            disabled={!config.enabled}
-                          />
-                          <div className="text-xs text-muted-foreground">{value.toFixed(1)}</div>
-                        </div>
-                      );
-                    })}
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">Outer loop (pos → vel)</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['kp', 'ki', 'kd'] as const).map(g => (
+                      <GainRow key={g} gain={g} value={cfg.outer[g]}
+                        max={{ kp: 6, ki: 1, kd: 2 }[g]} disabled={!cfg.enabled}
+                        onChange={v => updatePositionOuter(axis, g, v)} />
+                    ))}
                   </div>
                 </div>
-                
-                {axis !== 'y' && <Separator className="my-2" />}
+                <div className="space-y-1">
+                  <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">Inner loop (vel → attitude)</Label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {(['kp', 'ki', 'kd'] as const).map(g => (
+                      <GainRow key={g} gain={g} value={cfg.inner[g]}
+                        max={{ kp: 8, ki: 1, kd: 3 }[g]} disabled={!cfg.enabled}
+                        onChange={v => updatePositionInner(axis, g, v)} />
+                    ))}
+                  </div>
+                </div>
+                {axis !== 'y' && <Separator />}
               </div>
             );
           })}
         </CardContent>
       </Card>
 
-      {/* Drone Parameters */}
+      {/* Drone parameters — now actually applied */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-lg">Drone Parameters</CardTitle>
+          <CardTitle className="text-sm">Drone Parameters</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">Mass (kg)</Label>
-              <InfoTooltip content="Total mass of the quadrotor including battery and payload" />
+        <CardContent className="space-y-3">
+          {[
+            { label: 'Mass (kg)',      key: 'mass',    min: 0.3, max: 5,   step: 0.1  },
+            { label: 'Arm length (m)', key: 'length',  min: 0.1, max: 0.5, step: 0.01 },
+            { label: 'Drag coeff',     key: 'dragCoeff', min: 0, max: 0.1, step: 0.001 },
+            { label: 'Max thrust (N)', key: 'maxThrust', min: 5, max: 40,  step: 0.5  },
+            { label: 'ESC lag (s)',    key: 'motorTimeConstant', min: 0, max: 0.3, step: 0.005 },
+          ].map(({ label, key, min, max, step }) => (
+            <div key={key} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">{label}</Label>
+                <span className="text-xs font-mono text-muted-foreground">
+                  {(droneParams[key as keyof DroneParameters] as number).toFixed(step < 0.01 ? 3 : 2)}
+                </span>
+              </div>
+              <Slider
+                value={[droneParams[key as keyof DroneParameters] as number]}
+                onValueChange={([v]) => onDroneParamsChange({ [key]: v })}
+                min={min} max={max} step={step}
+              />
             </div>
-            <Slider
-              value={[droneParams.mass]}
-              onValueChange={([value]) => onDroneParamsChange({ mass: value })}
-              min={0.5}
-              max={5}
-              step={0.1}
-              className="w-full"
-            />
-            <div className="text-xs text-muted-foreground">{droneParams.mass.toFixed(1)} kg</div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">Arm Length (m)</Label>
-              <InfoTooltip content="Distance from center to motor (affects moment arm)" />
-            </div>
-            <Slider
-              value={[droneParams.length]}
-              onValueChange={([value]) => onDroneParamsChange({ length: value })}
-              min={0.1}
-              max={0.5}
-              step={0.01}
-              className="w-full"
-            />
-            <div className="text-xs text-muted-foreground">{droneParams.length.toFixed(2)} m</div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Label className="text-xs">Drag Coefficient</Label>
-              <InfoTooltip content="Air resistance factor affecting linear motion" />
-            </div>
-            <Slider
-              value={[droneParams.dragCoeff]}
-              onValueChange={([value]) => onDroneParamsChange({ dragCoeff: value })}
-              min={0}
-              max={0.1}
-              step={0.001}
-              className="w-full"
-            />
-            <div className="text-xs text-muted-foreground">{droneParams.dragCoeff.toFixed(3)}</div>
-          </div>
+          ))}
         </CardContent>
       </Card>
     </div>

@@ -1,293 +1,504 @@
 /**
- * 3D Drone Visualization using Three.js
+ * 3D Drone Visualization — Three.js
+ * Camera modes: orbit (free), follow (tracks drone), fpv (cockpit view).
+ * Features: waypoint markers, planned path line, wind arrow, trajectory ring buffer.
  */
 
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 import { DroneState } from '@/lib/physics/DroneModel';
+import { Waypoint, MissionState } from '@/lib/mission/WaypointPlanner';
+import { WindConfig } from '@/lib/physics/DroneModel';
+
+export type CameraMode = 'orbit' | 'follow' | 'fpv';
 
 interface DroneVisualizationProps {
-  droneState: DroneState;
+  stateRef: React.RefObject<DroneState | null>;
+  waypoints: Waypoint[];
+  missionState: MissionState;
+  wind: WindConfig;
+  cameraMode: CameraMode;
+  onGroundClick?: (position: { x: number; y: number; z: number }) => void;
   className?: string;
 }
 
+const TRAIL_LENGTH = 2000;
+
 export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
-  droneState,
-  className = ''
+  stateRef,
+  waypoints,
+  missionState,
+  wind,
+  cameraMode,
+  onGroundClick,
+  className = '',
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<{
+  const sceneDataRef = useRef<{
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
     renderer: THREE.WebGLRenderer;
     droneGroup: THREE.Group;
     propellers: THREE.Mesh[];
-    trajectory: THREE.Points;
-    trajectoryPositions: Float32Array;
-    trajectoryIndex: number;
-    gridHelper: THREE.GridHelper;
+    // Trajectory ring buffer
+    trailPoints: Float32Array;
+    trailGeo: THREE.BufferGeometry;
+    trailLine: THREE.Line;
+    trailHead: number;
+    trailCount: number;
+    // Waypoint objects
+    waypointGroup: THREE.Group;
+    pathLine: THREE.Line | null;
+    windArrow: THREE.ArrowHelper | null;
+    // Ground plane for raycasting
+    groundPlane: THREE.Mesh;
     frameId?: number;
+    // Camera orbit state
+    orbitAngleX: number;
+    orbitAngleY: number;
+    orbitDistance: number;
+    isDragging: boolean;
+    prevMouse: { x: number; y: number };
+    // Camera follow target (smooth)
+    followTarget: THREE.Vector3;
   }>();
 
-  // Initialize Three.js scene
+  const cameraModeRef = useRef<CameraMode>(cameraMode);
+  useEffect(() => { cameraModeRef.current = cameraMode; }, [cameraMode]);
+
+  const waypointsRef = useRef(waypoints);
+  useEffect(() => { waypointsRef.current = waypoints; }, [waypoints]);
+
+  const missionRef = useRef(missionState);
+  useEffect(() => { missionRef.current = missionState; }, [missionState]);
+
+  const windRef = useRef(wind);
+  useEffect(() => { windRef.current = wind; }, [wind]);
+
+  const onGroundClickRef = useRef(onGroundClick);
+  useEffect(() => { onGroundClickRef.current = onGroundClick; }, [onGroundClick]);
+
+  // Rebuild waypoint markers whenever waypoints or mission state changes
+  const updateWaypointScene = useCallback(() => {
+    const sd = sceneDataRef.current;
+    if (!sd) return;
+    const { scene, waypointGroup } = sd;
+
+    // Clear old markers and path
+    while (waypointGroup.children.length > 0) waypointGroup.remove(waypointGroup.children[0]);
+    if (sd.pathLine) { scene.remove(sd.pathLine); sd.pathLine = null; }
+
+    const wps = waypointsRef.current;
+    const ms = missionRef.current;
+
+    wps.forEach((wp, i) => {
+      const isCurrent = (ms.status === 'running' || ms.status === 'holding') && i === ms.currentWaypointIndex;
+      const isCompleted = ms.status !== 'idle' && i < ms.currentWaypointIndex;
+
+      // Marker sphere
+      const geo = new THREE.SphereGeometry(0.15, 16, 16);
+      const mat = new THREE.MeshLambertMaterial({
+        color: isCurrent ? 0xfbbf24 : isCompleted ? 0x22c55e : 0x3b82f6,
+        transparent: true,
+        opacity: isCompleted ? 0.5 : 0.9,
+      });
+      const sphere = new THREE.Mesh(geo, mat);
+      sphere.position.set(wp.position.x, wp.position.z, wp.position.y);
+      waypointGroup.add(sphere);
+
+      // Vertical dashed line to ground
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(wp.position.x, 0, wp.position.y),
+        new THREE.Vector3(wp.position.x, wp.position.z, wp.position.y),
+      ]);
+      const lineMat = new THREE.LineBasicMaterial({ color: isCurrent ? 0xfbbf24 : 0x3b82f6, opacity: 0.4, transparent: true });
+      waypointGroup.add(new THREE.Line(lineGeo, lineMat));
+
+      // Label sprite
+      const canvas = document.createElement('canvas');
+      canvas.width = 128; canvas.height = 64;
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = isCurrent ? '#fbbf24' : '#3b82f6';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(wp.label || `WP${i + 1}`, 64, 40);
+      const texture = new THREE.CanvasTexture(canvas);
+      const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const sprite = new THREE.Sprite(spriteMat);
+      sprite.position.set(wp.position.x, wp.position.z + 0.5, wp.position.y);
+      sprite.scale.set(0.8, 0.4, 1);
+      waypointGroup.add(sprite);
+    });
+
+    // Path line through all waypoints
+    if (wps.length > 1) {
+      const pts = wps.map(wp => new THREE.Vector3(wp.position.x, wp.position.z, wp.position.y));
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
+      const lineMat = new THREE.LineDashedMaterial({ color: 0x3b82f6, dashSize: 0.3, gapSize: 0.15, opacity: 0.6, transparent: true });
+      const line = new THREE.Line(lineGeo, lineMat);
+      line.computeLineDistances();
+      scene.add(line);
+      sd.pathLine = line;
+    }
+  }, []);
+
+  useEffect(() => { updateWaypointScene(); }, [waypoints, missionState, updateWaypointScene]);
+
+  // Update wind arrow
+  useEffect(() => {
+    const sd = sceneDataRef.current;
+    if (!sd) return;
+    const { scene } = sd;
+    if (sd.windArrow) { scene.remove(sd.windArrow); sd.windArrow = null; }
+    const w = windRef.current;
+    if (w.enabled && w.speed > 0.2) {
+      const dir = new THREE.Vector3(Math.cos(w.direction), 0, Math.sin(w.direction)).normalize();
+      const origin = new THREE.Vector3(-8, 2, -8);
+      const len = 0.5 + w.speed * 0.3;
+      sd.windArrow = new THREE.ArrowHelper(dir, origin, len, 0x60a5fa, 0.4, 0.3);
+      scene.add(sd.windArrow);
+    }
+  }, [wind]);
+
+  // Initialize Three.js scene once
   useEffect(() => {
     if (!mountRef.current) return;
+    const w = mountRef.current.clientWidth;
+    const h = mountRef.current.clientHeight;
 
-    const width = mountRef.current.clientWidth;
-    const height = mountRef.current.clientHeight;
-
-    // Scene setup
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf8fafc);
-    scene.fog = new THREE.Fog(0xf8fafc, 10, 50);
+    scene.background = new THREE.Color(0x0f172a);
+    scene.fog = new THREE.FogExp2(0x0f172a, 0.025);
 
-    // Camera setup
-    const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-    camera.position.set(5, 5, 5);
+    const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 500);
+    camera.position.set(6, 5, 6);
     camera.lookAt(0, 0, 0);
 
-    // Renderer setup
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(width, height);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(w, h);
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
     mountRef.current.appendChild(renderer.domElement);
 
     // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
+    scene.add(new THREE.AmbientLight(0x334155, 1.5));
+    const sun = new THREE.DirectionalLight(0xffffff, 2);
+    sun.position.set(15, 20, 10);
+    sun.castShadow = true;
+    sun.shadow.mapSize.width = 2048;
+    sun.shadow.mapSize.height = 2048;
+    sun.shadow.camera.near = 0.1; sun.shadow.camera.far = 100;
+    sun.shadow.camera.left = -20; sun.shadow.camera.right = 20;
+    sun.shadow.camera.top = 20; sun.shadow.camera.bottom = -20;
+    scene.add(sun);
+    const fill = new THREE.PointLight(0x3b82f6, 1, 20);
+    fill.position.set(-5, 3, -5);
+    scene.add(fill);
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(10, 10, 5);
-    directionalLight.castShadow = true;
-    directionalLight.shadow.mapSize.width = 2048;
-    directionalLight.shadow.mapSize.height = 2048;
-    directionalLight.shadow.camera.near = 0.5;
-    directionalLight.shadow.camera.far = 50;
-    directionalLight.shadow.camera.left = -10;
-    directionalLight.shadow.camera.right = 10;
-    directionalLight.shadow.camera.top = 10;
-    directionalLight.shadow.camera.bottom = -10;
-    scene.add(directionalLight);
+    // Ground plane
+    const groundGeo = new THREE.PlaneGeometry(50, 50);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9, metalness: 0.0 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
 
     // Grid
-    const gridHelper = new THREE.GridHelper(20, 20, 0x1e40af, 0x94a3b8);
-    gridHelper.position.y = -0.1;
-    scene.add(gridHelper);
+    const grid = new THREE.GridHelper(50, 50, 0x1e40af, 0x1e3a6e);
+    grid.position.y = 0.001;
+    scene.add(grid);
 
-    // Create drone
+    // Invisible ground for raycasting clicks
+    const pickGeo = new THREE.PlaneGeometry(100, 100);
+    const pickMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+    const groundPlane = new THREE.Mesh(pickGeo, pickMat);
+    groundPlane.rotation.x = -Math.PI / 2;
+    scene.add(groundPlane);
+
+    // ─── Drone model ──────────────────────────────────────────────────
     const droneGroup = new THREE.Group();
-    
-    // Drone body (central sphere)
-    const bodyGeometry = new THREE.SphereGeometry(0.05, 16, 16);
-    const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x1e293b });
-    const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+
+    // Central body (box)
+    const bodyGeo = new THREE.BoxGeometry(0.06, 0.025, 0.06);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, metalness: 0.6, roughness: 0.3 });
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.castShadow = true;
     droneGroup.add(body);
 
-    // Arms
-    const armGeometry = new THREE.CylinderGeometry(0.01, 0.01, 0.5);
-    const armMaterial = new THREE.MeshLambertMaterial({ color: 0x374151 });
-    
-    const arms = [];
-    for (let i = 0; i < 4; i++) {
-      const arm = new THREE.Mesh(armGeometry, armMaterial);
+    // Arms (4 cylinders in X config, diagonal)
+    const armMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.4, roughness: 0.5 });
+    const armAngles = [45, -45, 135, -135];
+    const armLength = 0.28;
+    const propellers: THREE.Mesh[] = [];
+
+    armAngles.forEach((angleDeg, i) => {
+      const angleRad = angleDeg * Math.PI / 180;
+      const armGeo = new THREE.CylinderGeometry(0.008, 0.008, armLength, 8);
+      const arm = new THREE.Mesh(armGeo, armMat);
       arm.rotation.z = Math.PI / 2;
-      arm.rotation.y = (i * Math.PI) / 2;
-      arm.position.x = Math.cos((i * Math.PI) / 2) * 0.125;
-      arm.position.z = Math.sin((i * Math.PI) / 2) * 0.125;
+      arm.rotation.y = angleRad;
+      arm.position.set(Math.cos(angleRad) * armLength / 2, 0, Math.sin(angleRad) * armLength / 2);
       arm.castShadow = true;
       droneGroup.add(arm);
-      arms.push(arm);
-    }
 
-    // Propellers
-    const propellers: THREE.Mesh[] = [];
-    const propellerGeometry = new THREE.CylinderGeometry(0.08, 0.08, 0.005, 32);
-    const propellerMaterial = new THREE.MeshLambertMaterial({ color: 0x22c55e, transparent: true, opacity: 0.7 });
-    
-    for (let i = 0; i < 4; i++) {
-      const propeller = new THREE.Mesh(propellerGeometry, propellerMaterial);
-      propeller.position.x = Math.cos((i * Math.PI) / 2) * 0.25;
-      propeller.position.z = Math.sin((i * Math.PI) / 2) * 0.25;
-      propeller.position.y = 0.02;
-      propeller.castShadow = true;
-      droneGroup.add(propeller);
-      propellers.push(propeller);
-    }
+      // Motor housing
+      const motorGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.02, 12);
+      const motorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.8, roughness: 0.2 });
+      const motorMesh = new THREE.Mesh(motorGeo, motorMat);
+      motorMesh.position.set(Math.cos(angleRad) * armLength, 0.01, Math.sin(angleRad) * armLength);
+      droneGroup.add(motorMesh);
 
-    // Add direction indicator (forward arrow)
-    const arrowGeometry = new THREE.ConeGeometry(0.02, 0.08, 8);
-    const arrowMaterial = new THREE.MeshLambertMaterial({ color: 0xef4444 });
-    const arrow = new THREE.Mesh(arrowGeometry, arrowMaterial);
-    arrow.position.x = 0.15;
+      // Propeller
+      const propGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.006, 32);
+      const propMat = new THREE.MeshStandardMaterial({
+        color: i % 2 === 0 ? 0x22c55e : 0xf59e0b,
+        transparent: true, opacity: 0.75,
+        metalness: 0.1, roughness: 0.5,
+      });
+      const prop = new THREE.Mesh(propGeo, propMat);
+      prop.position.set(Math.cos(angleRad) * armLength, 0.018, Math.sin(angleRad) * armLength);
+      droneGroup.add(prop);
+      propellers.push(prop);
+    });
+
+    // Forward direction indicator (red arrow on nose)
+    const arrowGeo = new THREE.ConeGeometry(0.018, 0.06, 8);
+    const arrowMat = new THREE.MeshStandardMaterial({ color: 0xef4444 });
+    const arrow = new THREE.Mesh(arrowGeo, arrowMat);
+    arrow.position.set(0.12, 0, 0);
     arrow.rotation.z = -Math.PI / 2;
     droneGroup.add(arrow);
 
+    // LEDs on arms
+    const ledPositions = armAngles.map(deg => {
+      const a = deg * Math.PI / 180;
+      return { x: Math.cos(a) * armLength, z: Math.sin(a) * armLength };
+    });
+    ledPositions.forEach((pos, i) => {
+      const ledGeo = new THREE.SphereGeometry(0.012, 8, 8);
+      const ledMat = new THREE.MeshStandardMaterial({
+        color: i < 2 ? 0xffffff : 0xff4444,
+        emissive: i < 2 ? 0xffffff : 0xff4444,
+        emissiveIntensity: 2,
+      });
+      const led = new THREE.Mesh(ledGeo, ledMat);
+      led.position.set(pos.x, 0.02, pos.z);
+      droneGroup.add(led);
+    });
+
     scene.add(droneGroup);
 
-    // Trajectory
-    const maxTrajectoryPoints = 1000;
-    const trajectoryPositions = new Float32Array(maxTrajectoryPoints * 3);
-    const trajectoryGeometry = new THREE.BufferGeometry();
-    trajectoryGeometry.setAttribute('position', new THREE.BufferAttribute(trajectoryPositions, 3));
-    
-    const trajectoryMaterial = new THREE.PointsMaterial({
-      color: 0x3b82f6,
-      size: 0.02,
-      transparent: true,
-      opacity: 0.6
-    });
-    
-    const trajectory = new THREE.Points(trajectoryGeometry, trajectoryMaterial);
-    scene.add(trajectory);
+    // ─── Trajectory trail (ring buffer as line strip) ──────────────
+    const trailPoints = new Float32Array(TRAIL_LENGTH * 3);
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPoints, 3));
+    trailGeo.setDrawRange(0, 0);
+    const trailMat = new THREE.LineBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0.5 });
+    const trailLine = new THREE.Line(trailGeo, trailMat);
+    scene.add(trailLine);
 
-    // Store references
-    sceneRef.current = {
-      scene,
-      camera,
-      renderer,
-      droneGroup,
-      propellers,
-      trajectory,
-      trajectoryPositions,
-      trajectoryIndex: 0,
-      gridHelper
+    // Waypoint group
+    const waypointGroup = new THREE.Group();
+    scene.add(waypointGroup);
+
+    sceneDataRef.current = {
+      scene, camera, renderer,
+      droneGroup, propellers,
+      trailPoints, trailGeo, trailLine, trailHead: 0, trailCount: 0,
+      waypointGroup, pathLine: null, windArrow: null,
+      groundPlane,
+      frameId: undefined,
+      orbitAngleX: 0.4, orbitAngleY: 0.8, orbitDistance: 10,
+      isDragging: false, prevMouse: { x: 0, y: 0 },
+      followTarget: new THREE.Vector3(0, 0, 0),
     };
 
-    // Mouse controls
-    let isDragging = false;
-    let previousMousePosition = { x: 0, y: 0 };
-    let cameraDistance = 8;
-    let cameraAngleX = Math.PI / 6;
-    let cameraAngleY = Math.PI / 4;
-
-    const updateCameraPosition = () => {
-      if (!sceneRef.current) return;
-      const { camera } = sceneRef.current;
-      
-      camera.position.x = cameraDistance * Math.cos(cameraAngleY) * Math.cos(cameraAngleX);
-      camera.position.y = cameraDistance * Math.sin(cameraAngleX);
-      camera.position.z = cameraDistance * Math.sin(cameraAngleY) * Math.cos(cameraAngleX);
-      camera.lookAt(0, 0, 0);
+    // ─── Mouse / Touch controls ───────────────────────────────────────
+    const updateOrbitCamera = () => {
+      const sd = sceneDataRef.current!;
+      const { camera: cam, orbitAngleX, orbitAngleY, orbitDistance, followTarget } = sd;
+      const target = cameraModeRef.current === 'follow' ? followTarget : new THREE.Vector3(0, 0, 0);
+      cam.position.set(
+        target.x + orbitDistance * Math.cos(orbitAngleY) * Math.cos(orbitAngleX),
+        target.y + orbitDistance * Math.sin(orbitAngleX),
+        target.z + orbitDistance * Math.sin(orbitAngleY) * Math.cos(orbitAngleX),
+      );
+      cam.lookAt(target);
     };
 
-    const handleMouseDown = (event: MouseEvent) => {
-      isDragging = true;
-      previousMousePosition = { x: event.clientX, y: event.clientY };
+    const onMouseDown = (e: MouseEvent) => {
+      const sd = sceneDataRef.current!;
+      sd.isDragging = true;
+      sd.prevMouse = { x: e.clientX, y: e.clientY };
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      const sd = sceneDataRef.current!;
+      if (!sd.isDragging) return;
+      const dx = e.clientX - sd.prevMouse.x;
+      const dy = e.clientY - sd.prevMouse.y;
+      sd.orbitAngleY += dx * 0.008;
+      sd.orbitAngleX = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, sd.orbitAngleX - dy * 0.008));
+      sd.prevMouse = { x: e.clientX, y: e.clientY };
+      if (cameraModeRef.current !== 'fpv') updateOrbitCamera();
+    };
+    const onMouseUp = () => { if (sceneDataRef.current) sceneDataRef.current.isDragging = false; };
+    const onWheel = (e: WheelEvent) => {
+      const sd = sceneDataRef.current!;
+      sd.orbitDistance = Math.max(1.5, Math.min(30, sd.orbitDistance + e.deltaY * 0.015));
+      if (cameraModeRef.current !== 'fpv') updateOrbitCamera();
     };
 
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!isDragging) return;
-      
-      const deltaX = event.clientX - previousMousePosition.x;
-      const deltaY = event.clientY - previousMousePosition.y;
-      
-      cameraAngleY += deltaX * 0.01;
-      cameraAngleX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, cameraAngleX - deltaY * 0.01));
-      
-      updateCameraPosition();
-      
-      previousMousePosition = { x: event.clientX, y: event.clientY };
+    // Click-to-place waypoint (raycasting against ground plane)
+    const raycaster = new THREE.Raycaster();
+    const mouseVec = new THREE.Vector2();
+    let clickStartX = 0, clickStartY = 0;
+
+    const onMouseDownClick = (e: MouseEvent) => { clickStartX = e.clientX; clickStartY = e.clientY; };
+    const onMouseUpClick = (e: MouseEvent) => {
+      const dist = Math.sqrt((e.clientX - clickStartX) ** 2 + (e.clientY - clickStartY) ** 2);
+      if (dist > 5 || !onGroundClickRef.current) return; // was a drag, not a click
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouseVec.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouseVec.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouseVec, camera);
+      const hits = raycaster.intersectObject(groundPlane);
+      if (hits.length > 0) {
+        const p = hits[0].point;
+        // Three.js XZ → sim XY, current drone altitude as Z
+        const droneState = stateRef.current;
+        const z = droneState?.position.z ?? 2;
+        onGroundClickRef.current({ x: p.x, y: p.z, z });
+      }
     };
 
-    const handleMouseUp = () => {
-      isDragging = false;
+    const onResize = () => {
+      const sd = sceneDataRef.current;
+      if (!sd || !mountRef.current) return;
+      const w2 = mountRef.current.clientWidth;
+      const h2 = mountRef.current.clientHeight;
+      sd.camera.aspect = w2 / h2;
+      sd.camera.updateProjectionMatrix();
+      sd.renderer.setSize(w2, h2);
     };
 
-    const handleWheel = (event: WheelEvent) => {
-      cameraDistance = Math.max(2, Math.min(20, cameraDistance + event.deltaY * 0.01));
-      updateCameraPosition();
-    };
+    renderer.domElement.addEventListener('mousedown', onMouseDown);
+    renderer.domElement.addEventListener('mousedown', onMouseDownClick);
+    renderer.domElement.addEventListener('mouseup', onMouseUpClick);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    renderer.domElement.addEventListener('wheel', onWheel, { passive: true });
+    window.addEventListener('resize', onResize);
 
-    const handleResize = () => {
-      if (!mountRef.current || !sceneRef.current) return;
-      
-      const width = mountRef.current.clientWidth;
-      const height = mountRef.current.clientHeight;
-      
-      sceneRef.current.camera.aspect = width / height;
-      sceneRef.current.camera.updateProjectionMatrix();
-      sceneRef.current.renderer.setSize(width, height);
-    };
+    updateOrbitCamera();
 
-    // Event listeners
-    renderer.domElement.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    renderer.domElement.addEventListener('wheel', handleWheel);
-    window.addEventListener('resize', handleResize);
-
-    updateCameraPosition();
-
-    // Animation loop
+    // ─── Animation loop ───────────────────────────────────────────────
     const animate = () => {
-      if (!sceneRef.current) return;
-      
-      const { renderer, scene, camera, propellers } = sceneRef.current;
-      
-      // Animate propellers
-      propellers.forEach(propeller => {
-        propeller.rotation.y += 0.3;
-      });
-      
-      renderer.render(scene, camera);
-      sceneRef.current.frameId = requestAnimationFrame(animate);
-    };
+      const sd = sceneDataRef.current;
+      if (!sd) return;
+      const { scene: sc, camera: cam, renderer: rend, droneGroup: dg, propellers: props,
+              trailPoints: tp, trailGeo: tg } = sd;
 
+      // Read latest true state from ref (updated at 100Hz by sim, zero React overhead)
+      const state = stateRef.current;
+      if (state) {
+        const { position: pos, orientation: ori } = state;
+        // Sim: X=east Y=north Z=up  →  Three.js: X=right Y=up Z=toward-camera
+        dg.position.set(pos.x, pos.z, pos.y);
+        // ZYX Euler → Three.js Euler (order XYZ in Three.js = pitch, yaw, -roll for our convention)
+        dg.rotation.set(ori.pitch, -ori.yaw, ori.roll, 'ZYX');
+
+        // Append to trajectory ring buffer
+        const idx = (sd.trailHead % TRAIL_LENGTH) * 3;
+        tp[idx]   = pos.x;
+        tp[idx+1] = pos.z;
+        tp[idx+2] = pos.y;
+        sd.trailHead++;
+        sd.trailCount = Math.min(sd.trailCount + 1, TRAIL_LENGTH);
+
+        // Draw range for line strip (always start from oldest point)
+        const posAttr = tg.getAttribute('position') as THREE.BufferAttribute;
+        posAttr.needsUpdate = true;
+        tg.setDrawRange(0, sd.trailCount);
+
+        // Camera follow target
+        sd.followTarget.lerp(new THREE.Vector3(pos.x, pos.z, pos.y), 0.05);
+      }
+
+      // Camera positioning based on mode
+      const mode = cameraModeRef.current;
+      if (mode === 'fpv' && state) {
+        // FPV: camera at drone nose, looking forward in drone's body frame
+        const pos = state.position;
+        const ori = state.orientation;
+        // Body-frame forward = +X in sim = (cos(yaw)*cos(pitch), sin(yaw)*cos(pitch), sin(pitch))
+        // In Three.js: X=east stays X, Z=south (sim Y → -Three.js Z), Y=up
+        const fwdX = Math.cos(ori.yaw) * Math.cos(ori.pitch);
+        const fwdY = Math.sin(ori.pitch);
+        const fwdZ = Math.sin(ori.yaw) * Math.cos(ori.pitch);
+        const camPos = new THREE.Vector3(pos.x + fwdX * 0.05, pos.z + 0.04, pos.y + fwdZ * 0.05);
+        cam.position.copy(camPos);
+        const lookTarget = new THREE.Vector3(pos.x + fwdX * 5, pos.z + fwdY * 5, pos.y + fwdZ * 5);
+        cam.lookAt(lookTarget);
+        cam.up.set(0, 1, 0);
+      } else if (mode === 'follow') {
+        const target2 = sd.followTarget;
+        const dist = sd.orbitDistance;
+        const aX = sd.orbitAngleX; const aY = sd.orbitAngleY;
+        cam.position.set(
+          target2.x + dist * Math.cos(aY) * Math.cos(aX),
+          target2.y + dist * Math.sin(aX),
+          target2.z + dist * Math.sin(aY) * Math.cos(aX),
+        );
+        cam.lookAt(target2);
+      }
+      // 'orbit' mode camera updated by mouse events only
+
+      // Spin propellers (faster = more thrust visual feedback)
+      props.forEach((p, i) => { p.rotation.y += (i % 2 === 0 ? 0.4 : -0.4); });
+
+      rend.render(sc, cam);
+      sd.frameId = requestAnimationFrame(animate);
+    };
     animate();
 
-    // Cleanup
     return () => {
-      if (sceneRef.current?.frameId) {
-        cancelAnimationFrame(sceneRef.current.frameId);
-      }
-      
-      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-      renderer.domElement.removeEventListener('wheel', handleWheel);
-      window.removeEventListener('resize', handleResize);
-      
-      mountRef.current?.removeChild(renderer.domElement);
+      const sd = sceneDataRef.current;
+      if (sd?.frameId) cancelAnimationFrame(sd.frameId);
+      renderer.domElement.removeEventListener('mousedown', onMouseDown);
+      renderer.domElement.removeEventListener('mousedown', onMouseDownClick);
+      renderer.domElement.removeEventListener('mouseup', onMouseUpClick);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      renderer.domElement.removeEventListener('wheel', onWheel);
+      window.removeEventListener('resize', onResize);
+      if (mountRef.current) mountRef.current.removeChild(renderer.domElement);
       renderer.dispose();
     };
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once
 
-  // Update drone position and orientation
+  // Reset trail on external reset (caller sets stateRef.current = null briefly)
   useEffect(() => {
-    if (!sceneRef.current) return;
-
-    const { droneGroup, trajectory, trajectoryPositions } = sceneRef.current;
-    const { position, orientation } = droneState;
-
-    // Update drone position
-    droneGroup.position.set(position.x, position.z, position.y); // Note: Y and Z swapped for Three.js
-
-    // Update drone orientation (Euler angles)
-    droneGroup.rotation.set(orientation.pitch, orientation.yaw, -orientation.roll);
-
-    // Update trajectory
-    if (sceneRef.current.trajectoryIndex < trajectoryPositions.length / 3 - 1) {
-      const index = sceneRef.current.trajectoryIndex * 3;
-      trajectoryPositions[index] = position.x;
-      trajectoryPositions[index + 1] = position.z;
-      trajectoryPositions[index + 2] = position.y;
-      
-      const positionAttribute = trajectory.geometry.getAttribute('position') as THREE.BufferAttribute;
-      positionAttribute.needsUpdate = true;
-      trajectory.geometry.setDrawRange(0, sceneRef.current.trajectoryIndex + 1);
-      
-      sceneRef.current.trajectoryIndex++;
+    const sd = sceneDataRef.current;
+    if (!sd) return;
+    // Trail reset: caller should set stateRef to null then back to state
+    if (!stateRef.current) {
+      sd.trailHead = 0;
+      sd.trailCount = 0;
+      sd.trailGeo.setDrawRange(0, 0);
+      (sd.trailGeo.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+      sd.followTarget.set(0, 0, 0);
     }
-  }, [droneState]);
+  });
 
   return (
-    <div 
-      ref={mountRef} 
-      className={`w-full h-full bg-gradient-to-br from-background to-muted rounded-lg shadow-lg ${className}`}
-      style={{ minHeight: '400px' }}
+    <div
+      ref={mountRef}
+      className={`w-full h-full relative ${className}`}
+      style={{ minHeight: 300, background: '#0f172a', cursor: cameraMode === 'fpv' ? 'none' : 'grab' }}
     />
   );
 };
