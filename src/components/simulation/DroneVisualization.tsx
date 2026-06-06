@@ -10,7 +10,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DroneState } from '@/lib/physics/DroneModel';
 import { Waypoint, MissionState } from '@/lib/mission/WaypointPlanner';
 import { WindConfig } from '@/lib/physics/DroneModel';
-import { buildDrone, buildEnvironment, type Propeller } from './droneScene';
+import { buildDrone, buildEnvironment, disposeDrone, type Propeller } from './droneScene';
+import type { AirframeSpec } from '@/core';
 
 export type CameraMode = 'orbit' | 'follow' | 'fpv';
 
@@ -20,6 +21,7 @@ interface DroneVisualizationProps {
   missionState: MissionState;
   wind: WindConfig;
   cameraMode: CameraMode;
+  airframe?: AirframeSpec;
   onGroundClick?: (position: { x: number; y: number; z: number }) => void;
   className?: string;
 }
@@ -32,6 +34,7 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
   missionState,
   wind,
   cameraMode,
+  airframe,
   onGroundClick,
   className = '',
 }) => {
@@ -64,6 +67,9 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
 
   const cameraModeRef = useRef<CameraMode>(cameraMode);
   useEffect(() => { cameraModeRef.current = cameraMode; }, [cameraMode]);
+
+  const airframeRef = useRef(airframe);
+  useEffect(() => { airframeRef.current = airframe; }, [airframe]);
 
   const waypointsRef = useRef(waypoints);
   useEffect(() => { waypointsRef.current = waypoints; }, [waypoints]);
@@ -192,7 +198,7 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     scene.add(groundPlane);
 
     // ─── Realistic drone model ────────────────────────────────────────
-    const { group: droneGroup, propellers } = buildDrone();
+    const { group: droneGroup, propellers } = buildDrone(airframeRef.current);
     scene.add(droneGroup);
 
     // ─── Trajectory trail (ring buffer as line strip) ──────────────
@@ -370,6 +376,23 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run once
+
+  // Rebuild the drone model when the airframe changes (quad → hexa → octo …).
+  useEffect(() => {
+    const sd = sceneDataRef.current;
+    if (!sd || !airframe) return;
+    const old = sd.droneGroup;
+    const { group, propellers } = buildDrone(airframe);
+    group.position.copy(old.position);
+    group.quaternion.copy(old.quaternion);
+    sd.scene.remove(old);
+    disposeDrone(old);
+    sd.scene.add(group);
+    sd.droneGroup = group;
+    sd.propellers = propellers;
+    sd.spinRate = 0;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [airframe?.id]);
 
   // Reset trail on external reset (caller sets stateRef.current = null briefly)
   useEffect(() => {

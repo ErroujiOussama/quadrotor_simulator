@@ -596,6 +596,7 @@ export const DroneSimulationInterface: React.FC = () => {
                       missionState={missionState}
                       wind={wind}
                       cameraMode={cameraMode}
+                      airframe={sim?.getAirframe()}
                       onGroundClick={handleGroundClick}
                       className="w-full h-full"
                     />

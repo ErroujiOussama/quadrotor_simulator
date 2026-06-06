@@ -1,13 +1,14 @@
 /**
- * Scene builders for the 3D viewport — a realistic procedural quadrotor and a
- * daylight environment. Kept separate from DroneVisualization so the rendering
- * detail can evolve without touching camera/interaction logic.
+ * Scene builders for the 3D viewport — a realistic procedural multirotor and a
+ * daylight environment. The drone is built from an AirframeSpec's rotor geometry
+ * so quad / hexa / octo render with the correct arm/motor/prop count and layout.
  *
- * Local model frame: Y is up; arms lie in the XZ plane; propellers spin about Y.
- * (DroneVisualization maps sim ENU → this frame.)
+ * Local model frame: Y is up; arms lie in the XZ plane (body X→local X forward,
+ * body Y→local Z). DroneVisualization maps sim ENU → this frame.
  */
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { buildAirframe, type AirframeSpec } from "@/core";
 
 export interface Propeller {
   /** Spins about local Y. Holds the blades + hub. */
@@ -25,18 +26,9 @@ export interface DroneModel {
   propellers: Propeller[];
 }
 
-const ARM_LENGTH = 0.26;
-const PROP_RADIUS = 0.13;
-// X-config motor mounts (degrees in the XZ plane). FL, FR, RL, RR.
-const ARM_ANGLES = [45, -45, 135, -135];
-// Spin directions matching the physics mixer (FL/RR CCW, FR/RL CW).
-const ARM_DIR = [1, -1, -1, 1];
-
 /** A single curved, tapered propeller blade as an extruded airfoil planform. */
-function buildBlade(mat: THREE.Material, dir: number): THREE.Mesh {
-  const len = PROP_RADIUS;
+function buildBlade(mat: THREE.Material, dir: number, len: number): THREE.Mesh {
   const shape = new THREE.Shape();
-  // Planform in the XY plane: root near origin, tapering tip; one edge curved.
   shape.moveTo(0.012, -0.006);
   shape.quadraticCurveTo(len * 0.55, -0.018, len, -0.004);
   shape.quadraticCurveTo(len * 1.02, 0, len, 0.004);
@@ -44,32 +36,19 @@ function buildBlade(mat: THREE.Material, dir: number): THREE.Mesh {
   shape.closePath();
 
   const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: 0.0016,
-    bevelEnabled: true,
-    bevelThickness: 0.0006,
-    bevelSize: 0.0006,
-    bevelSegments: 1,
+    depth: 0.0016, bevelEnabled: true, bevelThickness: 0.0006, bevelSize: 0.0006, bevelSegments: 1,
   });
-  // Lay flat: extrude is in XY(+Z depth) → rotate so span=X, chord=Z, thickness=Y.
   geo.rotateX(-Math.PI / 2);
   const blade = new THREE.Mesh(geo, mat);
-  // Blade pitch (angle of attack), sign follows spin direction.
-  blade.rotation.x = dir * 0.28;
+  blade.rotation.x = dir * 0.28; // blade pitch follows spin direction
   blade.castShadow = true;
   return blade;
 }
 
-/** Build one propeller (hub + 2 blades) plus its motion-blur disc. */
-function buildPropeller(dir: number, blade2Tone: boolean): Propeller {
+function buildPropeller(dir: number, twoTone: boolean, radius: number): Propeller {
   const pivot = new THREE.Group();
+  const bladeMat = new THREE.MeshStandardMaterial({ color: twoTone ? 0x111418 : 0x14181d, metalness: 0.1, roughness: 0.55 });
 
-  const bladeMat = new THREE.MeshStandardMaterial({
-    color: blade2Tone ? 0x111418 : 0x14181d,
-    metalness: 0.1,
-    roughness: 0.55,
-  });
-
-  // Hub
   const hub = new THREE.Mesh(
     new THREE.CylinderGeometry(0.014, 0.016, 0.012, 16),
     new THREE.MeshStandardMaterial({ color: 0x0b0d10, metalness: 0.7, roughness: 0.35 }),
@@ -77,25 +56,15 @@ function buildPropeller(dir: number, blade2Tone: boolean): Propeller {
   hub.castShadow = true;
   pivot.add(hub);
 
-  // Two blades, 180° apart.
-  const b1 = buildBlade(bladeMat, dir);
-  const b2 = buildBlade(bladeMat, dir);
+  const b1 = buildBlade(bladeMat, dir, radius);
+  const b2 = buildBlade(bladeMat, dir, radius);
   b2.rotation.y = Math.PI;
-  // Offset blades outward from the hub.
   b1.position.x = 0.012;
   b2.position.x = -0.012;
   pivot.add(b1, b2);
 
-  // Motion-blur disc (radial-gradient texture, fades with RPM).
-  const discTex = makeDiscTexture();
-  const discMat = new THREE.MeshBasicMaterial({
-    map: discTex,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-  const disc = new THREE.Mesh(new THREE.CircleGeometry(PROP_RADIUS * 1.02, 48), discMat);
+  const discMat = new THREE.MeshBasicMaterial({ map: makeDiscTexture(), transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(radius * 1.02, 48), discMat);
   disc.rotation.x = -Math.PI / 2;
   disc.position.y = 0.001;
   pivot.add(disc);
@@ -103,7 +72,6 @@ function buildPropeller(dir: number, blade2Tone: boolean): Propeller {
   return { pivot, disc, discMat, bladeMat, dir };
 }
 
-/** Soft radial gradient used for the spinning-prop blur disc. */
 function makeDiscTexture(): THREE.CanvasTexture {
   const size = 128;
   const c = document.createElement("canvas");
@@ -122,128 +90,107 @@ function makeDiscTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-/** Build the full realistic quadrotor model. */
-export function buildDrone(): DroneModel {
+/** Build the multirotor model for the given airframe (defaults to quad-X). */
+export function buildDrone(airframe?: AirframeSpec): DroneModel {
+  const af = airframe ?? buildAirframe("quad_x", 0.25);
+  const arm = af.armLength;
+  const rotors = af.rotors;
+  const n = rotors.length;
   const group = new THREE.Group();
 
-  // Materials
   const carbon = new THREE.MeshStandardMaterial({ color: 0x15181c, metalness: 0.35, roughness: 0.45 });
   const darkMetal = new THREE.MeshStandardMaterial({ color: 0x0c0e11, metalness: 0.85, roughness: 0.3 });
   const copper = new THREE.MeshStandardMaterial({ color: 0xb5703a, metalness: 0.9, roughness: 0.35 });
   const accent = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, metalness: 0.5, roughness: 0.3 });
 
-  // ── Central frame: stacked carbon plates ──────────────────────
-  const bottomPlate = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.052, 0.006, 6), carbon);
-  bottomPlate.rotation.y = Math.PI / 6;
+  // Central frame scales gently with the airframe size.
+  const bodyR = Math.max(0.045, arm * 0.22);
+  const sides = n <= 4 ? 6 : n;
+  const bottomPlate = new THREE.Mesh(new THREE.CylinderGeometry(bodyR * 1.04, bodyR * 1.04, 0.006, sides), carbon);
   bottomPlate.position.y = -0.004;
   group.add(bottomPlate);
-
-  const topPlate = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.006, 6), carbon);
-  topPlate.rotation.y = Math.PI / 6;
+  const topPlate = new THREE.Mesh(new THREE.CylinderGeometry(bodyR, bodyR, 0.006, sides), carbon);
   topPlate.position.y = 0.02;
   group.add(topPlate);
 
-  // Standoffs between plates
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 0.024, 8), darkMetal);
-    post.position.set(Math.cos(a) * 0.03, 0.008, Math.sin(a) * 0.03);
-    group.add(post);
-  }
-
-  // Battery (under the body)
-  const battery = new THREE.Mesh(
-    new THREE.BoxGeometry(0.07, 0.018, 0.035),
-    new THREE.MeshStandardMaterial({ color: 0x1b1f24, metalness: 0.2, roughness: 0.6 }),
-  );
-  battery.position.y = -0.014;
-  battery.castShadow = true;
+  const battery = new THREE.Mesh(new THREE.BoxGeometry(bodyR * 1.3, 0.018, bodyR * 0.7),
+    new THREE.MeshStandardMaterial({ color: 0x1b1f24, metalness: 0.2, roughness: 0.6 }));
+  battery.position.y = -0.014; battery.castShadow = true;
   group.add(battery);
 
-  // Canopy / flight controller stack
   const canopy = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.014, 0.03), accent);
-  canopy.position.y = 0.03;
-  canopy.castShadow = true;
+  canopy.position.y = 0.03; canopy.castShadow = true;
   group.add(canopy);
 
-  // ── Front camera pod + gimbal ─────────────────────────────────
+  // Front camera pod (also the visual "forward" indicator) at +X.
   const podHousing = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.022, 0.026), darkMetal);
-  podHousing.position.set(0.05, -0.002, 0);
-  podHousing.castShadow = true;
+  podHousing.position.set(bodyR * 0.9, -0.002, 0); podHousing.castShadow = true;
   group.add(podHousing);
-  const lens = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.008, 0.009, 0.01, 16),
-    new THREE.MeshStandardMaterial({ color: 0x05070a, metalness: 0.6, roughness: 0.1 }),
-  );
-  lens.rotation.z = Math.PI / 2;
-  lens.position.set(0.066, -0.002, 0);
+  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.009, 0.01, 16),
+    new THREE.MeshStandardMaterial({ color: 0x05070a, metalness: 0.6, roughness: 0.1 }));
+  lens.rotation.z = Math.PI / 2; lens.position.set(bodyR * 0.9 + 0.016, -0.002, 0);
   group.add(lens);
-  // Glass glint
-  const glass = new THREE.Mesh(
-    new THREE.CircleGeometry(0.006, 16),
-    new THREE.MeshStandardMaterial({ color: 0x1b3a5b, metalness: 0.9, roughness: 0.05, emissive: 0x0a1a2a, emissiveIntensity: 0.4 }),
-  );
-  glass.rotation.y = Math.PI / 2;
-  glass.position.set(0.0715, -0.002, 0);
-  group.add(glass);
 
-  // ── Arms, motors, propellers, LEDs, landing gear ──────────────
+  // Prop radius from rotor spacing so blades don't overlap on hexa/octo.
+  const propRadius = Math.min(0.14, Math.max(0.05, (2 * Math.PI * arm / n) * 0.4));
   const propellers: Propeller[] = [];
 
-  ARM_ANGLES.forEach((deg, i) => {
-    const a = (deg * Math.PI) / 180;
-    const ex = Math.cos(a) * ARM_LENGTH;
-    const ez = Math.sin(a) * ARM_LENGTH;
+  rotors.forEach((r, i) => {
+    const ex = r.position.x;   // body forward → local X
+    const ez = r.position.y;   // body left → local Z
+    const ang = Math.atan2(ez, ex);
+    const len = Math.hypot(ex, ez);
 
-    // Tapered carbon arm
-    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.009, ARM_LENGTH, 10), carbon);
-    arm.rotation.z = Math.PI / 2;
-    arm.rotation.y = -a;
-    arm.position.set(ex / 2, 0, ez / 2);
-    arm.castShadow = true;
-    group.add(arm);
+    const armMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.009, len, 10), carbon);
+    armMesh.rotation.z = Math.PI / 2;
+    armMesh.rotation.y = -ang;
+    armMesh.position.set(ex / 2, 0, ez / 2);
+    armMesh.castShadow = true;
+    group.add(armMesh);
 
-    // Motor bell (stator + rotor cap) with copper windings hint
     const stator = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.008, 16), copper);
     stator.position.set(ex, 0.004, ez);
     group.add(stator);
     const bell = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.017, 0.014, 16), darkMetal);
-    bell.position.set(ex, 0.014, ez);
-    bell.castShadow = true;
+    bell.position.set(ex, 0.014, ez); bell.castShadow = true;
     group.add(bell);
 
-    // Propeller on top of the motor
-    const prop = buildPropeller(ARM_DIR[i], i % 2 === 0);
+    const prop = buildPropeller(r.spin, i % 2 === 0, propRadius);
     prop.pivot.position.set(ex, 0.024, ez);
     group.add(prop.pivot);
     propellers.push(prop);
 
-    // Arm-tip LED (front pair white, rear pair red)
-    const front = deg === 45 || deg === -45;
-    const ledColor = front ? 0xffffff : 0xff3344;
-    const led = new THREE.Mesh(
-      new THREE.SphereGeometry(0.006, 10, 10),
-      new THREE.MeshStandardMaterial({ color: ledColor, emissive: ledColor, emissiveIntensity: 2.5 }),
-    );
-    led.position.set(ex * 0.92, -0.004, ez * 0.92);
+    // Nav LED: front rotors white, rear red.
+    const ledColor = ex > 0.001 ? 0xffffff : 0xff3344;
+    const led = new THREE.Mesh(new THREE.SphereGeometry(0.006, 10, 10),
+      new THREE.MeshStandardMaterial({ color: ledColor, emissive: ledColor, emissiveIntensity: 2.5 }));
+    led.position.set(ex * 0.9, -0.004, ez * 0.9);
     group.add(led);
-
-    // Landing leg
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 0.06, 8), darkMetal);
-    leg.position.set(ex * 0.45, -0.034, ez * 0.45);
-    leg.rotation.set(ez * 0.6, 0, -ex * 0.6);
-    group.add(leg);
   });
 
-  // Foot skids (two bars under the legs)
+  // Landing skids.
   for (const sign of [1, -1]) {
-    const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.34, 8), darkMetal);
+    const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, arm * 1.3, 8), darkMetal);
     skid.rotation.x = Math.PI / 2;
-    skid.position.set(sign * 0.12, -0.062, 0);
+    skid.position.set(sign * arm * 0.45, -0.062, 0);
     group.add(skid);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, 0.06, 8), darkMetal);
+    leg.position.set(sign * arm * 0.45, -0.034, 0);
+    group.add(leg);
   }
 
   return { group, propellers };
+}
+
+/** Dispose all geometries/materials in a drone group (on airframe rebuild). */
+export function disposeDrone(group: THREE.Group): void {
+  group.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+    const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+    if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+    else if (mat) mat.dispose();
+  });
 }
 
 /**
@@ -252,20 +199,16 @@ export function buildDrone(): DroneModel {
  * Returns a disposer for the PMREM resources.
  */
 export function buildEnvironment(scene: THREE.Scene, renderer: THREE.WebGLRenderer): () => void {
-  // Sky gradient as the background.
   scene.background = makeSkyTexture();
   scene.fog = new THREE.Fog(0xbcd2e8, 18, 90);
 
-  // Image-based lighting for PBR reflections (makes metal read as metal).
   const pmrem = new THREE.PMREMGenerator(renderer);
   const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
   scene.environment = envRT.texture;
 
-  // Sky/ground hemisphere fill.
   const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x4a4636, 1.1);
   scene.add(hemi);
 
-  // Warm directional sun with soft shadows.
   const sun = new THREE.DirectionalLight(0xfff2d6, 2.6);
   sun.position.set(14, 22, 8);
   sun.castShadow = true;
@@ -280,7 +223,6 @@ export function buildEnvironment(scene: THREE.Scene, renderer: THREE.WebGLRender
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
 
-  // Detailed ground: large textured plane (concrete + survey grid).
   const groundTex = makeGroundTexture();
   groundTex.wrapS = groundTex.wrapT = THREE.RepeatWrapping;
   groundTex.repeat.set(24, 24);
@@ -293,7 +235,6 @@ export function buildEnvironment(scene: THREE.Scene, renderer: THREE.WebGLRender
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Subtle near-origin reference grid for the engineering feel.
   const grid = new THREE.GridHelper(40, 40, 0x6b7280, 0x3f4854);
   (grid.material as THREE.Material).opacity = 0.25;
   (grid.material as THREE.Material).transparent = true;
@@ -312,9 +253,9 @@ function makeSkyTexture(): THREE.CanvasTexture {
   c.height = 256;
   const ctx = c.getContext("2d")!;
   const g = ctx.createLinearGradient(0, 0, 0, 256);
-  g.addColorStop(0.0, "#3b76c4"); // high sky
+  g.addColorStop(0.0, "#3b76c4");
   g.addColorStop(0.45, "#7fb0e6");
-  g.addColorStop(0.8, "#c4dbf0"); // horizon haze
+  g.addColorStop(0.8, "#c4dbf0");
   g.addColorStop(1.0, "#dbe7f2");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 16, 256);
@@ -328,7 +269,6 @@ function makeGroundTexture(): THREE.CanvasTexture {
   const c = document.createElement("canvas");
   c.width = c.height = s;
   const ctx = c.getContext("2d")!;
-  // Concrete base with subtle noise.
   ctx.fillStyle = "#8d9499";
   ctx.fillRect(0, 0, s, s);
   for (let i = 0; i < 4000; i++) {
@@ -336,7 +276,6 @@ function makeGroundTexture(): THREE.CanvasTexture {
     ctx.fillStyle = `rgba(${v},${v + 4},${v + 8},0.06)`;
     ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2);
   }
-  // Survey grid lines.
   ctx.strokeStyle = "rgba(70,80,90,0.5)";
   ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, s, s);
