@@ -69,6 +69,40 @@ describe("Simulation", () => {
     expect(Number.isFinite(d.state.position.z)).toBe(true);
   });
 
+  it("AC5: estimation disabled leaves telemetry without an estimate", () => {
+    const sim = new Simulation({ seed: 1 });
+    sim.setFlightMode("position_hold");
+    sim.run(200);
+    expect(sim.getCurrentData()!.estimated).toBeUndefined();
+  });
+
+  it("reports estimated state + error when estimation is enabled", () => {
+    const sim = new Simulation({ seed: 1 });
+    sim.setEstimation({ enabled: true });
+    sim.setFlightMode("position_hold");
+    sim.setSetpoints({ position: { x: 0, y: 0, z: 4 } });
+    sim.run(3000);
+    const d = sim.getCurrentData()!;
+    expect(d.estimated).toBeDefined();
+    expect(d.estimationError!.position).toBeLessThan(1.5);
+    expect(d.estimationError!.attitude).toBeLessThan(0.1); // < ~6°
+  });
+
+  it("estimation runs alongside without changing the (truth-based) control loop", () => {
+    // Same seed/scenario with estimation on vs off ⇒ identical true trajectory,
+    // because the estimator is display-only and does not feed the controller.
+    const trajectory = (estimation: boolean) => {
+      const sim = new Simulation({ seed: 4 });
+      if (estimation) sim.setEstimation({ enabled: true });
+      sim.setFlightMode("position_hold");
+      sim.setSetpoints({ position: { x: 1, y: 1, z: 4 } });
+      sim.run(800);
+      const s = sim.getEulerState();
+      return [s.position.x, s.position.y, s.position.z];
+    };
+    expect(trajectory(true)).toEqual(trajectory(false));
+  });
+
   it("computes altitude step-response metrics", () => {
     const sim = new Simulation({ seed: 1 });
     sim.setFlightMode("position_hold");

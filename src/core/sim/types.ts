@@ -31,6 +31,18 @@ export const DEFAULT_FAILURES: FailureConfig = {
   sensorNoise: 0,
 };
 
+export interface EstimationConfig {
+  /** Run the sensor suite + estimator and report estimated state/error. */
+  enabled: boolean;
+  // NOTE: closing the control loop on the estimate (fly-on-estimate) needs a
+  // gyro-bias-estimating EKF — deferred to a future spec. The estimator here is
+  // display/analysis only; the validated control loop still uses true state.
+}
+
+export const DEFAULT_ESTIMATION: EstimationConfig = {
+  enabled: false,
+};
+
 export interface SimulationConfig {
   timestep: number;
   realTimeMultiplier: number;
@@ -69,6 +81,10 @@ export interface SimulationData {
   manualInputs: ManualInputs;
   missionState: MissionState;
   battery: BatteryTelemetry;
+  /** Estimated state (present when estimation is enabled). */
+  estimated?: EulerState;
+  /** Estimated-vs-true error: position (m) and attitude (rad) magnitudes. */
+  estimationError?: { position: number; attitude: number };
 }
 
 export interface PerformanceMetrics {

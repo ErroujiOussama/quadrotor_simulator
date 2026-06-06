@@ -16,7 +16,7 @@ import { Simulation } from "@/core";
 import type {
   SimulationData, SimulationConfig, FlightMode, ManualInputs,
   ControllerConfig, SetPoints, WindConfig, FailureConfig, EulerState,
-  RotorCraftParams, AirframeType, AirframeSpec,
+  RotorCraftParams, AirframeType, AirframeSpec, EstimationConfig,
 } from "@/core";
 import { buildAirframe } from "@/core";
 import type { DroneParameters } from "@/lib/physics/DroneModel";
@@ -72,6 +72,10 @@ export class DroneSimulator {
     });
     this.sim.setFlightMode("position_hold");
   }
+
+  /** Enable/disable the sensor suite + state estimator (display/analysis only). */
+  setEstimation(c: Partial<EstimationConfig>) { this.sim.setEstimation(c); }
+  getEstimation(): EstimationConfig { return this.sim.getEstimation(); }
 
   /** Switch the airframe (quad/hexa/octo). Preserves the current state. */
   setAirframe(type: AirframeType) { this.sim.setAirframe(type); }

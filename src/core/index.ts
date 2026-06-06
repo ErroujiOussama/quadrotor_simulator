@@ -79,6 +79,12 @@ export {
 } from "./mission/WaypointPlanner";
 export type { Waypoint, MissionState, MissionStatus } from "./mission/WaypointPlanner";
 
+// Sensors & estimation
+export { SensorSuite, DEFAULT_SENSOR_CONFIG } from "./sensors/Sensors";
+export type { SensorConfig, ImuReading } from "./sensors/Sensors";
+export { StateEstimator, DEFAULT_ESTIMATOR_CONFIG } from "./estimation/StateEstimator";
+export type { EstimatorConfig } from "./estimation/StateEstimator";
+
 // Simulation
 export { Simulation } from "./sim/Simulation";
 export type { SimulationOptions } from "./sim/Simulation";
@@ -86,6 +92,7 @@ export { simulationFromRecord, replay } from "./sim/RunRecord";
 export {
   DEFAULT_SIM_CONFIG,
   DEFAULT_FAILURES,
+  DEFAULT_ESTIMATION,
 } from "./sim/types";
 export type {
   SimulationConfig,
@@ -93,6 +100,7 @@ export type {
   EulerState,
   MotorInputs,
   FailureConfig,
+  EstimationConfig,
   PerformanceMetrics,
   BatteryTelemetry,
   RunRecord,

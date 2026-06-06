@@ -36,7 +36,7 @@ import type { ImperativePanelHandle } from 'react-resizable-panels';
 import {
   Play, Pause, RotateCcw, Download, Zap, Wind, Gamepad2, Eye, Camera, Crosshair,
   Navigation, SlidersHorizontal, BatteryMedium, Command as CommandIcon, Keyboard,
-  Activity, Plane, Cpu, Gauge, ChevronDown,
+  Activity, Plane, Cpu, Gauge, ChevronDown, LocateFixed,
 } from 'lucide-react';
 
 type LeftSection = 'tune' | 'mission' | 'env' | 'rc';
@@ -87,6 +87,7 @@ export const DroneSimulationInterface: React.FC = () => {
   const [manualInputs, setManualInputs] = useState<ManualInputs>({ pitch: 0, roll: 0, yaw: 0, throttle: 0.5 });
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
   const [airframe, setAirframe] = useState<AirframeType>('quad_x');
+  const [estimationOn, setEstimationOn] = useState(false);
   const [missionTick, setMissionTick] = useState(0); // force re-render on mission change
 
   // ─── Shell state ───────────────────────────────────────────────────
@@ -312,6 +313,14 @@ export const DroneSimulationInterface: React.FC = () => {
     simulatorRef.current?.reset(); // clear telemetry of the previous rotor count
   }, []);
 
+  const toggleEstimation = useCallback(() => {
+    setEstimationOn(on => {
+      const next = !on;
+      simulatorRef.current?.setEstimation({ enabled: next });
+      return next;
+    });
+  }, []);
+
   // ─── Panel collapse helpers ────────────────────────────────────────
   const togglePanel = (ref: React.RefObject<ImperativePanelHandle>) => {
     const p = ref.current; if (!p) return;
@@ -443,6 +452,20 @@ export const DroneSimulationInterface: React.FC = () => {
               </div>
             </TooltipTrigger>
             <TooltipContent>Airframe (resets the sim)</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant={estimationOn ? 'default' : 'outline'}
+                className="h-8 gap-1.5 text-xs"
+                onClick={toggleEstimation}
+              >
+                <LocateFixed className="h-3.5 w-3.5" />EKF
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Toggle state estimation (sensors + estimator, display-only)</TooltipContent>
           </Tooltip>
 
           {/* Right cluster */}
@@ -738,6 +761,15 @@ export const DroneSimulationInterface: React.FC = () => {
                         <TeleRow label="Overshoot" value={metrics.altitudeOvershoot != null ? `${metrics.altitudeOvershoot.toFixed(1)}%` : '—'} />
                         <TeleRow label="Position RMSE" value={`${metrics.positionRMSE.toFixed(3)} m`} />
                         <TeleRow label="Attitude RMSE" value={`${metrics.attitudeRMSE.toFixed(3)} rad`} />
+                      </InspectorSection>
+                    )}
+
+                    {currentData?.estimated && currentData.estimationError && (
+                      <InspectorSection icon={<LocateFixed className="h-3.5 w-3.5" />} title="State Estimation (vs truth)">
+                        <TeleRow label="Est. position" value={`${currentData.estimated.position.x.toFixed(2)}, ${currentData.estimated.position.y.toFixed(2)}, ${currentData.estimated.position.z.toFixed(2)} m`} />
+                        <TeleRow label="Position error" value={`${currentData.estimationError.position.toFixed(3)} m`} />
+                        <TeleRow label="Attitude error" value={`${(currentData.estimationError.attitude * RAD2DEG).toFixed(2)}°`} />
+                        <div className="text-[10px] text-muted-foreground pt-1">IMU + GPS + baro + mag → Mahony + KF</div>
                       </InspectorSection>
                     )}
 

@@ -12,6 +12,9 @@ import { SeededRng } from "../rng/SeededRng";
 import { RotorCraft, RotorCraftParams } from "../vehicles/RotorCraft";
 import { AirframeSpec, AirframeType, buildAirframe, mixToThrottles } from "../vehicles/airframes";
 import { Environment, WindConfig } from "../physics/Environment";
+import { SensorSuite } from "../sensors/Sensors";
+import { StateEstimator } from "../estimation/StateEstimator";
+import { Vec3 } from "../math/Vec3";
 import {
   FlightController, FlightMode, ManualInputs, ControllerConfig,
   SetPoints, DEFAULT_CONTROLLER_CONFIG, ControlOutputs,
@@ -19,8 +22,8 @@ import {
 import { WaypointPlanner } from "../mission/WaypointPlanner";
 import { IntegratorName } from "../physics/integrators";
 import {
-  SimulationConfig, SimulationData, EulerState, FailureConfig,
-  PerformanceMetrics, BatteryTelemetry, DEFAULT_SIM_CONFIG, DEFAULT_FAILURES,
+  SimulationConfig, SimulationData, EulerState, FailureConfig, EstimationConfig,
+  PerformanceMetrics, BatteryTelemetry, DEFAULT_SIM_CONFIG, DEFAULT_FAILURES, DEFAULT_ESTIMATION,
 } from "./types";
 
 export interface SimulationOptions {
@@ -35,6 +38,12 @@ export interface SimulationOptions {
 
 const ZERO_OUTPUTS: ControlOutputs = { altitude: 0, roll: 0, pitch: 0, yaw: 0, positionX: 0, positionY: 0 };
 
+function wrapPi(a: number): number {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
+}
+
 export class Simulation {
   readonly waypoints = new WaypointPlanner();
   private rng: SeededRng;
@@ -47,6 +56,11 @@ export class Simulation {
   private armLength: number;
   private droneParams: Partial<RotorCraftParams>;
   private integrator: IntegratorName;
+
+  private sensors: SensorSuite;
+  private estimator: StateEstimator;
+  private estimation: EstimationConfig = { ...DEFAULT_ESTIMATION };
+  private prevVelocity = Vec3.ZERO;
 
   private config: SimulationConfig;
   private failures: FailureConfig = { ...DEFAULT_FAILURES };
@@ -71,7 +85,14 @@ export class Simulation {
     this.drone = new RotorCraft({ airframe: this.airframe, params: this.droneParams, integrator: this.integrator });
     this.controller = new FlightController(opts.controllerConfig ?? DEFAULT_CONTROLLER_CONFIG);
     this.env = new Environment(this.rng);
+    // Sensors draw from an independent forked stream so enabling estimation never
+    // perturbs the physics/control RNG (the truth trajectory is unaffected).
+    this.sensors = new SensorSuite(this.rng.fork());
+    this.estimator = new StateEstimator({ position: this.drone.state.position, attitude: this.drone.state.attitude });
   }
+
+  setEstimation(c: Partial<EstimationConfig>) { this.estimation = { ...this.estimation, ...c }; }
+  getEstimation(): EstimationConfig { return { ...this.estimation }; }
 
   private rebuildDrone(initial?: Partial<RotorCraft["state"]>) {
     this.airframe = buildAirframe(this.airframeType, this.armLength);
@@ -156,7 +177,30 @@ export class Simulation {
     const truePos = this.drone.state.position;
     const n = this.failures.sensorNoise;
 
-    const sensed = {
+    // ── State estimation (optional) ──
+    let estimated: EulerState | undefined;
+    if (this.estimation.enabled) {
+      const curVel = this.drone.state.velocity;
+      const accelWorld = curVel.sub(this.prevVelocity).scale(1 / dt);
+      this.prevVelocity = curVel;
+      const imu = this.sensors.imu(this.drone.state, accelWorld);
+      this.estimator.setMagYaw(this.sensors.mag(this.drone.state));
+      this.estimator.predict(imu, dt);
+      const gps = this.sensors.gps(this.drone.state, dt);
+      if (gps) this.estimator.fuseGps(gps);
+      this.estimator.fuseBaro(this.sensors.baro(this.drone.state, dt));
+      const es = this.estimator.getState();
+      estimated = {
+        position: es.position.toObject(),
+        velocity: es.velocity.toObject(),
+        orientation: es.attitude.toEuler(),
+        angularVelocity: es.angularVel.toObject(),
+      };
+    }
+
+    // Controller feedback: noisy true state. (The estimator runs for display/
+    // analysis only; closing the loop on it needs a full EKF — future spec.)
+    const feedback = {
       position: n > 0
         ? { x: truePos.x + (this.rng.next() - 0.5) * 2 * n, y: truePos.y + (this.rng.next() - 0.5) * 2 * n, z: truePos.z + (this.rng.next() - 0.5) * 2 * n }
         : truePos.toObject(),
@@ -165,7 +209,7 @@ export class Simulation {
     };
 
     if (this.flightMode === "mission") {
-      const target = this.waypoints.update(sensed.position, dt);
+      const target = this.waypoints.update(feedback.position, dt);
       if (target) this.setpoints.position = { ...target };
     }
 
@@ -175,7 +219,7 @@ export class Simulation {
     let cmd: number[];
 
     if (this.config.enableControl && this.flightMode !== "manual") {
-      ctrl = this.controller.control(sensed, this.setpoints, dt);
+      ctrl = this.controller.control(feedback, this.setpoints, dt);
       const a = this.controller.axes(this.flightMode, ctrl, this.manualInputs, hover);
       cmd = mixToThrottles(this.airframe, a.base, a.roll, a.pitch, a.yaw);
     } else if (this.flightMode === "manual") {
@@ -212,6 +256,22 @@ export class Simulation {
       battery: this.batteryTelemetry(),
     };
 
+    if (estimated) {
+      const trueE = data.state;
+      data.estimated = estimated;
+      const dp = Math.hypot(
+        estimated.position.x - trueE.position.x,
+        estimated.position.y - trueE.position.y,
+        estimated.position.z - trueE.position.z,
+      );
+      const da = Math.hypot(
+        wrapPi(estimated.orientation.roll - trueE.orientation.roll),
+        wrapPi(estimated.orientation.pitch - trueE.orientation.pitch),
+        wrapPi(estimated.orientation.yaw - trueE.orientation.yaw),
+      );
+      data.estimationError = { position: dp, attitude: da };
+    }
+
     this.history.push(data);
     if (this.history.length > this.maxHistory) this.history.shift();
     this.currentTime += dt;
@@ -224,7 +284,10 @@ export class Simulation {
   reset() {
     this.rng = new SeededRng(this.seed);
     this.env = new Environment(this.rng);
+    this.sensors = new SensorSuite(this.rng.fork());
     this.rebuildDrone();
+    this.estimator = new StateEstimator({ position: this.drone.state.position, attitude: this.drone.state.attitude });
+    this.prevVelocity = Vec3.ZERO;
     this.controller.reset();
     this.currentTime = 0;
     this.history = [];
