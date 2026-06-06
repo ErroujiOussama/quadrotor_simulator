@@ -38,6 +38,16 @@ export type {
   MultirotorOptions,
   MotorCommand,
 } from "./vehicles/Multirotor";
+export type { Vehicle } from "./vehicles/Vehicle";
+export { RotorCraft, DEFAULT_ROTORCRAFT_PARAMS } from "./vehicles/RotorCraft";
+export type { RotorCraftParams, RotorCraftOptions } from "./vehicles/RotorCraft";
+export {
+  buildAirframe,
+  mixToThrottles,
+  rotorWrench,
+  AIRFRAME_TYPES,
+} from "./vehicles/airframes";
+export type { AirframeSpec, AirframeType, RotorDef } from "./vehicles/airframes";
 
 // Environment
 export { Environment, DEFAULT_WIND } from "./physics/Environment";
