@@ -91,42 +91,74 @@
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
+    /* FlyLab engineering-studio dark theme — deep slate + cyan accent. */
+    --background: 222 30% 7%;
+    --foreground: 210 30% 92%;
 
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
+    --card: 222 26% 10%;
+    --card-foreground: 210 30% 92%;
 
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 222 28% 9%;
+    --popover-foreground: 210 30% 92%;
 
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    /* Cyan/sky accent reads as a precision instrument highlight. */
+    --primary: 199 89% 52%;
+    --primary-foreground: 222 47% 8%;
+    --primary-hover: 199 89% 46%;
 
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 217 24% 16%;
+    --secondary-foreground: 210 30% 90%;
 
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 217 22% 14%;
+    --muted-foreground: 215 16% 60%;
 
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 199 89% 52%;
+    --accent-foreground: 222 47% 8%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --success: 152 60% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 25 25% 12%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --border: 217 22% 18%;
+    --input: 217 22% 16%;
+    --ring: 199 89% 52%;
+
+    --chart-1: 199 89% 55%;
+    --chart-2: 152 60% 50%;
+    --chart-3: 38 92% 58%;
+    --chart-4: 280 70% 62%;
+    --chart-5: 340 75% 60%;
+
+    --sidebar-background: 222 28% 9%;
+    --sidebar-foreground: 210 24% 80%;
+    --sidebar-primary: 199 89% 52%;
+    --sidebar-primary-foreground: 222 47% 8%;
+    --sidebar-accent: 217 24% 15%;
+    --sidebar-accent-foreground: 210 30% 92%;
+    --sidebar-border: 217 22% 16%;
+    --sidebar-ring: 199 89% 52%;
   }
+}
+
+@layer base {
+  html { color-scheme: dark; }
+  body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+  /* Slim, unobtrusive scrollbars for a pro/dense UI. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  *::-webkit-scrollbar { width: 8px; height: 8px; }
+  *::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.5); }
+  *::-webkit-scrollbar-track { background: transparent; }
 }
 
 @layer base {

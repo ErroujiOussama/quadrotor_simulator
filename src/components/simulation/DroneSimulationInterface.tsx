@@ -1,6 +1,12 @@
 /**
- * Main Drone Simulation Interface
- * Wires simulator, visualization, mission planner, environment, controls, and telemetry.
+ * FlyLab Studio — the application shell.
+ *
+ * A pro "studio" layout: top command bar (transport + flight-mode + status),
+ * a left activity rail that switches collapsible tool panels, a center 3D
+ * viewport with a floating toolbar, an always-on telemetry inspector on the
+ * right, a collapsible charts dock at the bottom, a global status bar, a
+ * command palette (⌘K), and keyboard shortcuts. All simulator wiring and the
+ * tool panels are reused unchanged — only the shell is new.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -14,19 +20,49 @@ import { ManualControlPanel } from '../controls/ManualControlPanel';
 import { MissionPanel } from '../mission/MissionPanel';
 import { EnvironmentPanel } from '../environment/EnvironmentPanel';
 import { FPVHud } from './FPVHud';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
+import { Separator } from '@/components/ui/separator';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut,
+} from '@/components/ui/command';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useKeyboard, applyKeyboardInputs } from '@/hooks/useKeyboard';
 import { useGamepad, applyGamepadInputs } from '@/hooks/useGamepad';
 import { createWaypoint } from '@/lib/mission/WaypointPlanner';
+import type { ImperativePanelHandle } from 'react-resizable-panels';
 import {
-  Activity, BarChart3, Settings, Monitor, BookOpen, Zap,
-  MapPin, Wind, Gamepad2, Eye, EyeOff, Camera, Navigation, Crosshair, BatteryMedium
+  Play, Pause, RotateCcw, Download, Zap, Wind, Gamepad2, Eye, Camera, Crosshair,
+  Navigation, SlidersHorizontal, BatteryMedium, Command as CommandIcon, Keyboard,
+  Activity, Plane, Cpu, Gauge, ChevronDown,
 } from 'lucide-react';
+
+type LeftSection = 'tune' | 'mission' | 'env' | 'rc';
+
+const FLIGHT_MODES: { id: FlightMode; short: string; label: string }[] = [
+  { id: 'manual', short: 'MAN', label: 'Manual' },
+  { id: 'stabilized', short: 'STAB', label: 'Stabilized' },
+  { id: 'altitude_hold', short: 'ALT', label: 'Altitude Hold' },
+  { id: 'position_hold', short: 'POS', label: 'Position Hold' },
+  { id: 'mission', short: 'MISN', label: 'Mission' },
+];
+
+const CAMERA_MODES: { id: CameraMode; icon: React.ReactNode; label: string }[] = [
+  { id: 'orbit', icon: <Eye className="h-3.5 w-3.5" />, label: 'Orbit' },
+  { id: 'follow', icon: <Camera className="h-3.5 w-3.5" />, label: 'Follow' },
+  { id: 'fpv', icon: <Crosshair className="h-3.5 w-3.5" />, label: 'FPV' },
+];
+
+const RAIL: { id: LeftSection; icon: React.ReactNode; label: string }[] = [
+  { id: 'tune', icon: <SlidersHorizontal className="h-5 w-5" />, label: 'Tuning & Setup' },
+  { id: 'mission', icon: <Navigation className="h-5 w-5" />, label: 'Mission Planner' },
+  { id: 'env', icon: <Wind className="h-5 w-5" />, label: 'Environment & Faults' },
+  { id: 'rc', icon: <Gamepad2 className="h-5 w-5" />, label: 'Manual / RC' },
+];
+
+const RAD2DEG = 180 / Math.PI;
 
 export const DroneSimulationInterface: React.FC = () => {
   const simulatorRef = useRef<DroneSimulator>();
@@ -42,6 +78,18 @@ export const DroneSimulationInterface: React.FC = () => {
   const [manualInputs, setManualInputs] = useState<ManualInputs>({ pitch: 0, roll: 0, yaw: 0, throttle: 0.5 });
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
   const [missionTick, setMissionTick] = useState(0); // force re-render on mission change
+
+  // ─── Shell state ───────────────────────────────────────────────────
+  const [leftSection, setLeftSection] = useState<LeftSection>('tune');
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [fps, setFps] = useState(0);
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [bottomCollapsed, setBottomCollapsed] = useState(false);
+  const leftPanelRef = useRef<ImperativePanelHandle>(null);
+  const rightPanelRef = useRef<ImperativePanelHandle>(null);
+  const bottomPanelRef = useRef<ImperativePanelHandle>(null);
 
   // ─── Config state (user controls) ─────────────────────────────────
   const [controllerConfig, setControllerConfig] = useState<ControllerConfig>(() => ({
@@ -142,11 +190,24 @@ export const DroneSimulationInterface: React.FC = () => {
     return () => { if (inputPollRef.current) cancelAnimationFrame(inputPollRef.current); };
   }, [gamepadState, keysPressedRef]);
 
+  // ─── FPS meter ─────────────────────────────────────────────────────
+  useEffect(() => {
+    let raf = 0, frames = 0, last = performance.now();
+    const loop = (t: number) => {
+      frames++;
+      if (t - last >= 1000) { setFps(Math.round((frames * 1000) / (t - last))); frames = 0; last = t; }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   // ─── Handlers ──────────────────────────────────────────────────────
   const handleStart = () => { simulatorRef.current?.start(); setIsRunning(true); };
   const handlePause = () => { simulatorRef.current?.pause(); setIsRunning(false); };
   const handleReset = () => { simulatorRef.current?.reset(); };
   const handleExport = () => { simulatorRef.current?.exportCSV(); };
+  const togglePlay = useCallback(() => { if (isRunning) { handlePause(); } else { handleStart(); } }, [isRunning]);
 
   const handleControllerConfigChange = useCallback((c: Partial<ControllerConfig>) => {
     const merged = { ...controllerConfig, ...c };
@@ -214,7 +275,38 @@ export const DroneSimulationInterface: React.FC = () => {
 
   const handleMissionChange = useCallback(() => { setMissionTick(t => t + 1); }, []);
 
-  // Derived display state
+  // ─── Panel collapse helpers ────────────────────────────────────────
+  const togglePanel = (ref: React.RefObject<ImperativePanelHandle>) => {
+    const p = ref.current; if (!p) return;
+    if (p.isCollapsed()) { p.expand(); } else { p.collapse(); }
+  };
+  const selectSection = (s: LeftSection) => {
+    setLeftSection(s);
+    const p = leftPanelRef.current;
+    if (p?.isCollapsed()) p.expand();
+  };
+  const cycleCamera = useCallback(() => {
+    setCameraMode(m => CAMERA_MODES[(CAMERA_MODES.findIndex(c => c.id === m) + 1) % CAMERA_MODES.length].id);
+  }, []);
+
+  // ─── Global keyboard shortcuts (avoid flight keys WASD/QE/Space/Shift/arrows) ──
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPaletteOpen(o => !o); return; }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      switch (e.key) {
+        case 'p': case 'P': e.preventDefault(); togglePlay(); break;
+        case 'r': case 'R': e.preventDefault(); handleReset(); break;
+        case 'c': case 'C': e.preventDefault(); cycleCamera(); break;
+        case '?': e.preventDefault(); setShortcutsOpen(o => !o); break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [togglePlay, cycleCamera]);
+
+  // ─── Derived display state ─────────────────────────────────────────
   const droneState: DroneState = currentData?.state ?? {
     position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
     orientation: { roll: 0, pitch: 0, yaw: 0 }, angularVelocity: { x: 0, y: 0, z: 0 },
@@ -224,189 +316,221 @@ export const DroneSimulationInterface: React.FC = () => {
   const metrics = currentData ? sim?.getMetrics() : undefined;
   const waypoints = sim ? sim.waypoints.getWaypoints() : [];
   const missionState = sim ? sim.waypoints.getMissionState() : { status: 'idle' as const, currentWaypointIndex: 0, holdTimer: 0, distanceToNext: 0, totalWaypoints: 0, looping: false };
-
-  // Camera mode label
-  const cameraModeIcon = { orbit: <Eye className="h-3 w-3" />, follow: <Camera className="h-3 w-3" />, fpv: <Crosshair className="h-3 w-3" /> }[cameraMode];
-
   const isFPV = cameraMode === 'fpv';
+  const speed = Math.sqrt(droneState.velocity.x ** 2 + droneState.velocity.y ** 2 + droneState.velocity.z ** 2);
+  const battery = currentData?.battery;
+
+  const runPalette = (fn: () => void) => { fn(); setPaletteOpen(false); };
 
   return (
-    <div className="h-screen bg-background flex flex-col">
-      {/* ─── Header ─────────────────────────────────────────────────── */}
-      <div className="border-b bg-card/50 backdrop-blur shrink-0">
-        <div className="px-4 flex h-14 items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-primary" />
-            <h1 className="text-lg font-bold tracking-tight">FlyLab</h1>
-            <Badge variant="secondary" className="text-[10px]">core v0.1</Badge>
-            <span className="hidden md:inline text-[10px] text-muted-foreground">Advanced Flight Simulator</span>
-          </div>
-
-          <div className="flex items-center gap-3 ml-auto text-xs font-mono">
-            {currentData && (
-              <>
-                <span className="text-muted-foreground">T: <span className="text-foreground">{currentData.time.toFixed(1)}s</span></span>
-                <span className="text-muted-foreground">Alt: <span className="text-foreground">{droneState.position.z.toFixed(2)}m</span></span>
-                <span className="text-muted-foreground">
-                  Spd: <span className="text-foreground">
-                    {Math.sqrt(droneState.velocity.x**2 + droneState.velocity.y**2 + droneState.velocity.z**2).toFixed(2)}m/s
-                  </span>
-                </span>
-              </>
-            )}
-            {currentData && (
-              <Badge
-                variant="outline"
-                className={
-                  currentData.battery.soc < 0.15 ? 'text-red-500'
-                  : currentData.battery.soc < 0.35 ? 'text-amber-500'
-                  : 'text-emerald-500'
-                }
-              >
-                <BatteryMedium className="h-3 w-3 mr-1" />
-                {(currentData.battery.soc * 100).toFixed(0)}% · {currentData.battery.voltage.toFixed(1)}V
-              </Badge>
-            )}
-            <Badge variant={isRunning ? 'default' : 'secondary'}>{isRunning ? 'Running' : 'Paused'}</Badge>
-            <Badge variant="outline" className="capitalize">{flightMode.replace(/_/g, ' ')}</Badge>
-            {gamepadState.connected && <Badge variant="outline" className="text-green-500"><Gamepad2 className="h-3 w-3 mr-1" />Pad</Badge>}
-            {keyboardActive && <Badge variant="outline" className="text-blue-500">Keys</Badge>}
-            {wind.enabled && <Badge variant="outline" className="text-cyan-500"><Wind className="h-3 w-3 mr-1" />{wind.speed.toFixed(0)}m/s</Badge>}
-            {failures.motorFailures.some(Boolean) && <Badge variant="destructive">Motor Fail</Badge>}
-          </div>
-        </div>
-      </div>
-
-      {/* ─── Main layout ─────────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0">
-        <ResizablePanelGroup direction="horizontal" className="h-full">
-          {/* Left sidebar */}
-          <ResizablePanel defaultSize={24} minSize={18} maxSize={35}>
-            <div className="h-full border-r bg-card/30 flex flex-col">
-              <Tabs defaultValue="pid" className="flex flex-col h-full">
-                <div className="px-3 pt-3 pb-1 border-b bg-card/50 shrink-0">
-                  <TabsList className="grid grid-cols-4 w-full h-8">
-                    <TabsTrigger value="pid" className="text-[10px] px-1">
-                      <Settings className="h-3 w-3 mr-0.5" />PID
-                    </TabsTrigger>
-                    <TabsTrigger value="mission" className="text-[10px] px-1">
-                      <Navigation className="h-3 w-3 mr-0.5" />Plan
-                    </TabsTrigger>
-                    <TabsTrigger value="env" className="text-[10px] px-1">
-                      <Wind className="h-3 w-3 mr-0.5" />Env
-                    </TabsTrigger>
-                    <TabsTrigger value="manual" className="text-[10px] px-1">
-                      <Gamepad2 className="h-3 w-3 mr-0.5" />RC
-                    </TabsTrigger>
-                  </TabsList>
-                </div>
-
-                <div className="flex-1 min-h-0">
-                  <TabsContent value="pid" className="h-full m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3">
-                        <ControlPanel
-                          isRunning={isRunning}
-                          controllerConfig={controllerConfig}
-                          setpoints={setpoints}
-                          droneParams={droneParams}
-                          simulationConfig={simulationConfig}
-                          onStart={handleStart}
-                          onPause={handlePause}
-                          onReset={handleReset}
-                          onExport={handleExport}
-                          onControllerConfigChange={handleControllerConfigChange}
-                          onSetpointsChange={handleSetpointsChange}
-                          onDroneParamsChange={handleDroneParamsChange}
-                          onSimulationConfigChange={handleSimConfigChange}
-                        />
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
-
-                  <TabsContent value="mission" className="h-full m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3">
-                        {sim && (
-                          <MissionPanel
-                            planner={sim.waypoints}
-                            missionState={missionState}
-                            onMissionChange={handleMissionChange}
-                            isSimRunning={isRunning}
-                          />
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
-
-                  <TabsContent value="env" className="h-full m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3">
-                        <EnvironmentPanel
-                          wind={wind}
-                          failures={failures}
-                          onWindChange={handleWindChange}
-                          onFailureChange={handleFailureChange}
-                        />
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
-
-                  <TabsContent value="manual" className="h-full m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3">
-                        <ManualControlPanel
-                          flightMode={flightMode}
-                          manualInputs={manualInputs}
-                          keyboardActive={keyboardActive}
-                          gamepadConnected={gamepadState.connected}
-                          gamepadId={gamepadState.id}
-                          onFlightModeChange={handleFlightModeChange}
-                          onManualInputsChange={handleManualInputsChange}
-                          onResetInputs={handleResetManualInputs}
-                        />
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
-                </div>
-              </Tabs>
+    <TooltipProvider delayDuration={300}>
+      <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden select-none">
+        {/* ═══ Top command bar ═══════════════════════════════════════ */}
+        <header className="h-12 shrink-0 border-b border-border bg-card/60 backdrop-blur flex items-center gap-3 px-3">
+          {/* Brand */}
+          <div className="flex items-center gap-2 pr-2">
+            <div className="h-7 w-7 rounded-md bg-gradient-to-br from-primary to-cyan-300 flex items-center justify-center shadow-sm">
+              <Zap className="h-4 w-4 text-primary-foreground" />
             </div>
-          </ResizablePanel>
+            <div className="leading-none">
+              <div className="text-sm font-bold tracking-tight">FlyLab</div>
+              <div className="text-[9px] text-muted-foreground -mt-0.5">Flight Studio</div>
+            </div>
+          </div>
 
-          <ResizableHandle withHandle />
+          <Separator orientation="vertical" className="h-6" />
 
-          {/* Right area */}
-          <ResizablePanel defaultSize={76} minSize={50}>
-            <ResizablePanelGroup direction="vertical" className="h-full">
-              {/* 3D viewport */}
-              <ResizablePanel defaultSize={62} minSize={35}>
-                <div className="h-full flex flex-col">
-                  {/* Viewport toolbar */}
-                  <div className="px-4 py-2 border-b bg-card/30 flex items-center gap-3 shrink-0">
-                    <Monitor className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm font-medium">3D View</span>
-                    <div className="ml-auto flex items-center gap-2">
-                      {/* Camera mode buttons */}
-                      {(['orbit', 'follow', 'fpv'] as CameraMode[]).map(m => (
-                        <Button
-                          key={m} size="sm" variant={cameraMode === m ? 'default' : 'outline'}
-                          className="h-7 text-xs gap-1"
-                          onClick={() => setCameraMode(m)}
-                        >
-                          {{ orbit: <Eye className="h-3 w-3" />, follow: <Camera className="h-3 w-3" />, fpv: <Crosshair className="h-3 w-3" /> }[m]}
-                          {m.charAt(0).toUpperCase() + m.slice(1)}
-                        </Button>
-                      ))}
-                      {waypoints.length > 0 && (
-                        <Badge variant="outline" className="text-xs">
-                          <MapPin className="h-3 w-3 mr-1" />{waypoints.length} WP
-                        </Badge>
-                      )}
-                    </div>
+          {/* Transport */}
+          <div className="flex items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0" onClick={handleReset}>
+                  <RotateCcw className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Reset <kbd className="ml-1 text-[10px]">R</kbd></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" className="h-8 gap-1.5 min-w-[92px]" onClick={togglePlay}>
+                  {isRunning ? <><Pause className="h-4 w-4" />Pause</> : <><Play className="h-4 w-4" />Start</>}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Start / Pause <kbd className="ml-1 text-[10px]">P</kbd></TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant="outline" className="h-8 w-8 p-0" onClick={handleExport}>
+                  <Download className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Export flight log (CSV)</TooltipContent>
+            </Tooltip>
+          </div>
+
+          <Separator orientation="vertical" className="h-6" />
+
+          {/* Flight-mode segmented control */}
+          <div className="flex items-center rounded-md border border-border bg-background/50 p-0.5">
+            {FLIGHT_MODES.map(m => (
+              <button
+                key={m.id}
+                onClick={() => handleFlightModeChange(m.id)}
+                className={`px-2 h-7 rounded text-[11px] font-medium tracking-wide transition-colors ${
+                  flightMode === m.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                }`}
+                title={m.label}
+              >
+                {m.short}
+              </button>
+            ))}
+          </div>
+
+          {/* Right cluster */}
+          <div className="ml-auto flex items-center gap-2">
+            <div className="hidden lg:flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+              <span>T <span className="text-foreground">{(currentData?.time ?? 0).toFixed(1)}s</span></span>
+              <span>·</span>
+              <span>FPS <span className="text-foreground">{fps}</span></span>
+              {battery && (
+                <>
+                  <span>·</span>
+                  <span className={battery.soc < 0.15 ? 'text-red-400' : battery.soc < 0.35 ? 'text-amber-400' : 'text-emerald-400'}>
+                    <BatteryMedium className="h-3.5 w-3.5 inline -mt-0.5 mr-0.5" />{(battery.soc * 100).toFixed(0)}%
+                  </span>
+                </>
+              )}
+            </div>
+            <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs text-muted-foreground" onClick={() => setPaletteOpen(true)}>
+              <CommandIcon className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Commands</span>
+              <kbd className="ml-1 px-1 rounded bg-muted text-[10px]">⌘K</kbd>
+            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => setShortcutsOpen(true)}>
+                  <Keyboard className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Keyboard shortcuts <kbd className="ml-1 text-[10px]">?</kbd></TooltipContent>
+            </Tooltip>
+          </div>
+        </header>
+
+        {/* ═══ Body: rail + docks ════════════════════════════════════ */}
+        <div className="flex-1 min-h-0 flex">
+          {/* Activity rail */}
+          <nav className="w-12 shrink-0 border-r border-border bg-card/40 flex flex-col items-center py-2 gap-1">
+            {RAIL.map(item => {
+              const active = leftSection === item.id && !leftCollapsed;
+              return (
+                <Tooltip key={item.id}>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => (active ? togglePanel(leftPanelRef) : selectSection(item.id))}
+                      className={`relative h-10 w-10 rounded-lg flex items-center justify-center transition-colors ${
+                        active ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                      }`}
+                    >
+                      {active && <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full bg-primary" />}
+                      {item.icon}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">{item.label}</TooltipContent>
+                </Tooltip>
+              );
+            })}
+            <div className="mt-auto flex flex-col gap-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={() => togglePanel(rightPanelRef)}
+                    className={`h-10 w-10 rounded-lg flex items-center justify-center transition-colors ${
+                      rightCollapsed ? 'text-muted-foreground hover:text-foreground hover:bg-muted' : 'text-primary bg-primary/10'
+                    }`}
+                  >
+                    <Activity className="h-5 w-5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">Toggle telemetry</TooltipContent>
+              </Tooltip>
+            </div>
+          </nav>
+
+          {/* Resizable docks */}
+          <ResizablePanelGroup direction="horizontal" className="flex-1 min-w-0">
+            {/* Left tool panel */}
+            <ResizablePanel
+              ref={leftPanelRef}
+              id="left" order={1}
+              defaultSize={23} minSize={16} collapsible collapsedSize={0}
+              onCollapse={() => setLeftCollapsed(true)} onExpand={() => setLeftCollapsed(false)}
+              className="bg-card/30"
+            >
+              <div className="h-full flex flex-col">
+                <PanelHeader
+                  icon={RAIL.find(r => r.id === leftSection)!.icon}
+                  title={RAIL.find(r => r.id === leftSection)!.label}
+                  onClose={() => togglePanel(leftPanelRef)}
+                />
+                <ScrollArea className="flex-1 min-h-0">
+                  <div className="p-3">
+                    {leftSection === 'tune' && (
+                      <ControlPanel
+                        isRunning={isRunning}
+                        controllerConfig={controllerConfig}
+                        setpoints={setpoints}
+                        droneParams={droneParams}
+                        simulationConfig={simulationConfig}
+                        onStart={handleStart}
+                        onPause={handlePause}
+                        onReset={handleReset}
+                        onExport={handleExport}
+                        onControllerConfigChange={handleControllerConfigChange}
+                        onSetpointsChange={handleSetpointsChange}
+                        onDroneParamsChange={handleDroneParamsChange}
+                        onSimulationConfigChange={handleSimConfigChange}
+                      />
+                    )}
+                    {leftSection === 'mission' && sim && (
+                      <MissionPanel
+                        planner={sim.waypoints}
+                        missionState={missionState}
+                        onMissionChange={handleMissionChange}
+                        isSimRunning={isRunning}
+                      />
+                    )}
+                    {leftSection === 'env' && (
+                      <EnvironmentPanel
+                        wind={wind}
+                        failures={failures}
+                        onWindChange={handleWindChange}
+                        onFailureChange={handleFailureChange}
+                      />
+                    )}
+                    {leftSection === 'rc' && (
+                      <ManualControlPanel
+                        flightMode={flightMode}
+                        manualInputs={manualInputs}
+                        keyboardActive={keyboardActive}
+                        gamepadConnected={gamepadState.connected}
+                        gamepadId={gamepadState.id}
+                        onFlightModeChange={handleFlightModeChange}
+                        onManualInputsChange={handleManualInputsChange}
+                        onResetInputs={handleResetManualInputs}
+                      />
+                    )}
                   </div>
+                </ScrollArea>
+              </div>
+            </ResizablePanel>
 
-                  {/* Three.js canvas + FPV HUD */}
-                  <div className="flex-1 min-h-0 relative">
+            <ResizableHandle withHandle />
+
+            {/* Center: viewport + bottom dock */}
+            <ResizablePanel id="center" order={2} defaultSize={54} minSize={30}>
+              <ResizablePanelGroup direction="vertical">
+                <ResizablePanel id="viewport" order={1} defaultSize={66} minSize={30}>
+                  <div className="h-full relative bg-[#0b1220]">
                     <DroneVisualization
                       stateRef={stateRef}
                       waypoints={waypoints}
@@ -424,210 +548,279 @@ export const DroneSimulationInterface: React.FC = () => {
                         simTime={currentData.time}
                       />
                     )}
+
+                    {/* Floating top-left status */}
+                    <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none">
+                      <div className="px-2.5 h-7 rounded-md bg-background/70 backdrop-blur border border-border flex items-center gap-2 text-xs">
+                        <span className={`h-1.5 w-1.5 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-muted-foreground'}`} />
+                        <span className="font-medium">{isRunning ? 'LIVE' : 'PAUSED'}</span>
+                        <span className="text-muted-foreground">·</span>
+                        <span className="capitalize text-muted-foreground">{flightMode.replace(/_/g, ' ')}</span>
+                      </div>
+                      {waypoints.length > 0 && (
+                        <div className="px-2 h-7 rounded-md bg-background/70 backdrop-blur border border-border flex items-center gap-1 text-xs text-muted-foreground">
+                          <Navigation className="h-3 w-3" />{waypoints.length}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Floating camera toolbar */}
+                    <div className="absolute top-3 right-3 flex items-center gap-1 p-0.5 rounded-lg bg-background/70 backdrop-blur border border-border">
+                      {CAMERA_MODES.map(c => (
+                        <Tooltip key={c.id}>
+                          <TooltipTrigger asChild>
+                            <button
+                              onClick={() => setCameraMode(c.id)}
+                              className={`h-7 px-2 rounded-md flex items-center gap-1.5 text-xs transition-colors ${
+                                cameraMode === c.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+                              }`}
+                            >
+                              {c.icon}<span className="hidden xl:inline">{c.label}</span>
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>{c.label} view</TooltipContent>
+                        </Tooltip>
+                      ))}
+                    </div>
+
+                    {/* Floating bottom-left HUD readout */}
+                    <div className="absolute bottom-3 left-3 flex items-center gap-3 px-3 h-8 rounded-md bg-background/70 backdrop-blur border border-border font-mono text-[11px] pointer-events-none">
+                      <span className="text-muted-foreground">ALT <span className="text-foreground">{droneState.position.z.toFixed(2)}m</span></span>
+                      <span className="text-muted-foreground">SPD <span className="text-foreground">{speed.toFixed(2)}m/s</span></span>
+                      <span className="text-muted-foreground">HDG <span className="text-foreground">{((droneState.orientation.yaw * RAD2DEG + 360) % 360).toFixed(0)}°</span></span>
+                    </div>
                   </div>
-                </div>
-              </ResizablePanel>
+                </ResizablePanel>
 
-              <ResizableHandle withHandle />
+                <ResizableHandle withHandle />
 
-              {/* Bottom panel — charts, telemetry, help */}
-              <ResizablePanel defaultSize={38} minSize={25}>
-                <Tabs defaultValue="charts" className="h-full flex flex-col">
-                  <div className="border-b bg-card/30 shrink-0">
-                    <TabsList className="mx-4 mt-2 mb-1 grid grid-cols-4 w-auto h-8">
-                      <TabsTrigger value="charts" className="text-xs"><BarChart3 className="h-3 w-3 mr-1" />Charts</TabsTrigger>
-                      <TabsTrigger value="data" className="text-xs"><Activity className="h-3 w-3 mr-1" />State</TabsTrigger>
-                      <TabsTrigger value="motors" className="text-xs"><Zap className="h-3 w-3 mr-1" />Motors</TabsTrigger>
-                      <TabsTrigger value="help" className="text-xs"><BookOpen className="h-3 w-3 mr-1" />Help</TabsTrigger>
-                    </TabsList>
+                {/* Bottom charts dock */}
+                <ResizablePanel
+                  ref={bottomPanelRef}
+                  id="dock" order={2}
+                  defaultSize={34} minSize={12} collapsible collapsedSize={0}
+                  onCollapse={() => setBottomCollapsed(true)} onExpand={() => setBottomCollapsed(false)}
+                >
+                  <div className="h-full flex flex-col bg-card/20">
+                    <PanelHeader
+                      icon={<Gauge className="h-3.5 w-3.5" />}
+                      title="Telemetry Charts"
+                      onClose={() => togglePanel(bottomPanelRef)}
+                    />
+                    <ScrollArea className="flex-1 min-h-0">
+                      <div className="p-3"><SimulationCharts data={dataHistory} /></div>
+                    </ScrollArea>
                   </div>
+                </ResizablePanel>
+              </ResizablePanelGroup>
+            </ResizablePanel>
 
-                  <TabsContent value="charts" className="flex-1 min-h-0 m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3">
-                        <SimulationCharts data={dataHistory} />
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
+            <ResizableHandle withHandle />
 
-                  <TabsContent value="data" className="flex-1 min-h-0 m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3 grid grid-cols-2 gap-3">
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Position (m)</CardTitle></CardHeader>
-                          <CardContent className="text-xs font-mono space-y-1">
-                            <div>X: <span className="text-foreground">{droneState.position.x.toFixed(4)}</span></div>
-                            <div>Y: <span className="text-foreground">{droneState.position.y.toFixed(4)}</span></div>
-                            <div>Z: <span className="text-foreground">{droneState.position.z.toFixed(4)}</span></div>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Velocity (m/s)</CardTitle></CardHeader>
-                          <CardContent className="text-xs font-mono space-y-1">
-                            <div>Vx: <span className="text-foreground">{droneState.velocity.x.toFixed(4)}</span></div>
-                            <div>Vy: <span className="text-foreground">{droneState.velocity.y.toFixed(4)}</span></div>
-                            <div>Vz: <span className="text-foreground">{droneState.velocity.z.toFixed(4)}</span></div>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Attitude (rad / °)</CardTitle></CardHeader>
-                          <CardContent className="text-xs font-mono space-y-1">
-                            <div>Roll:  <span className="text-foreground">{droneState.orientation.roll.toFixed(3)}</span> ({(droneState.orientation.roll*180/Math.PI).toFixed(1)}°)</div>
-                            <div>Pitch: <span className="text-foreground">{droneState.orientation.pitch.toFixed(3)}</span> ({(droneState.orientation.pitch*180/Math.PI).toFixed(1)}°)</div>
-                            <div>Yaw:   <span className="text-foreground">{droneState.orientation.yaw.toFixed(3)}</span> ({(droneState.orientation.yaw*180/Math.PI).toFixed(1)}°)</div>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Angular Velocity (rad/s)</CardTitle></CardHeader>
-                          <CardContent className="text-xs font-mono space-y-1">
-                            <div>P: <span className="text-foreground">{droneState.angularVelocity.x.toFixed(4)}</span></div>
-                            <div>Q: <span className="text-foreground">{droneState.angularVelocity.y.toFixed(4)}</span></div>
-                            <div>R: <span className="text-foreground">{droneState.angularVelocity.z.toFixed(4)}</span></div>
-                          </CardContent>
-                        </Card>
-                        {currentData && (
-                          <>
-                            <Card>
-                              <CardHeader className="pb-2"><CardTitle className="text-xs">Setpoints</CardTitle></CardHeader>
-                              <CardContent className="text-xs font-mono space-y-1">
-                                <div>X: {currentData.setpoints.position.x.toFixed(2)}</div>
-                                <div>Y: {currentData.setpoints.position.y.toFixed(2)}</div>
-                                <div>Z: {currentData.setpoints.position.z.toFixed(2)}</div>
-                                <div>Yaw: {(currentData.setpoints.attitude.yaw*180/Math.PI).toFixed(1)}°</div>
-                              </CardContent>
-                            </Card>
-                            <Card>
-                              <CardHeader className="pb-2"><CardTitle className="text-xs">Control Errors</CardTitle></CardHeader>
-                              <CardContent className="text-xs font-mono space-y-1">
-                                <div>Alt: {currentData.errors.altitude.toFixed(4)} m</div>
-                                <div>Roll: {currentData.errors.roll.toFixed(4)} rad</div>
-                                <div>Pitch: {currentData.errors.pitch.toFixed(4)} rad</div>
-                                <div>X: {currentData.errors.positionX.toFixed(4)} m</div>
-                                <div>Y: {currentData.errors.positionY.toFixed(4)} m</div>
-                              </CardContent>
-                            </Card>
-                            <Card>
-                              <CardHeader className="pb-2"><CardTitle className="text-xs">Battery / Powertrain</CardTitle></CardHeader>
-                              <CardContent className="text-xs font-mono space-y-1">
-                                <div>SoC: <span className="text-foreground">{(currentData.battery.soc * 100).toFixed(1)}%</span></div>
-                                <div>Voltage: <span className="text-foreground">{currentData.battery.voltage.toFixed(2)} V</span></div>
-                                <div>Drawn: <span className="text-foreground">{(currentData.battery.drawnAh * 1000).toFixed(0)} mAh</span></div>
-                                <div>Est. flight time: <span className="text-foreground">{currentData.battery.flightTimeS.toFixed(0)} s</span></div>
-                              </CardContent>
-                            </Card>
-                            {metrics && (
-                              <Card>
-                                <CardHeader className="pb-2"><CardTitle className="text-xs">Performance Metrics</CardTitle></CardHeader>
-                                <CardContent className="text-xs font-mono space-y-1">
-                                  <div>Rise time: <span className="text-foreground">{metrics.altitudeRiseTime != null ? `${metrics.altitudeRiseTime.toFixed(2)} s` : '—'}</span></div>
-                                  <div>Settling: <span className="text-foreground">{metrics.altitudeSettlingTime != null ? `${metrics.altitudeSettlingTime.toFixed(2)} s` : '—'}</span></div>
-                                  <div>Overshoot: <span className="text-foreground">{metrics.altitudeOvershoot != null ? `${metrics.altitudeOvershoot.toFixed(1)}%` : '—'}</span></div>
-                                  <div>Pos RMSE: <span className="text-foreground">{metrics.positionRMSE.toFixed(3)} m</span></div>
-                                  <div>Att RMSE: <span className="text-foreground">{metrics.attitudeRMSE.toFixed(3)} rad</span></div>
-                                </CardContent>
-                              </Card>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
+            {/* Right telemetry inspector */}
+            <ResizablePanel
+              ref={rightPanelRef}
+              id="right" order={3}
+              defaultSize={23} minSize={16} collapsible collapsedSize={0}
+              onCollapse={() => setRightCollapsed(true)} onExpand={() => setRightCollapsed(false)}
+              className="bg-card/30"
+            >
+              <div className="h-full flex flex-col">
+                <PanelHeader icon={<Activity className="h-3.5 w-3.5" />} title="Telemetry" onClose={() => togglePanel(rightPanelRef)} />
+                <ScrollArea className="flex-1 min-h-0">
+                  <div className="p-3 space-y-3">
+                    <InspectorSection icon={<Plane className="h-3.5 w-3.5" />} title="State">
+                      <TeleRow label="Position" value={`${droneState.position.x.toFixed(2)}, ${droneState.position.y.toFixed(2)}, ${droneState.position.z.toFixed(2)} m`} />
+                      <TeleRow label="Velocity" value={`${speed.toFixed(2)} m/s`} />
+                      <TeleRow label="Roll" value={`${(droneState.orientation.roll * RAD2DEG).toFixed(1)}°`} />
+                      <TeleRow label="Pitch" value={`${(droneState.orientation.pitch * RAD2DEG).toFixed(1)}°`} />
+                      <TeleRow label="Yaw" value={`${(droneState.orientation.yaw * RAD2DEG).toFixed(1)}°`} />
+                    </InspectorSection>
 
-                  <TabsContent value="motors" className="flex-1 min-h-0 m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3 space-y-3">
-                        {currentData && (
-                          <>
-                            <Card>
-                              <CardHeader className="pb-2"><CardTitle className="text-xs">Motor Commands (%)</CardTitle></CardHeader>
-                              <CardContent>
-                                <div className="grid grid-cols-2 gap-2">
-                                  {(['motor1','motor2','motor3','motor4'] as const).map((m, i) => {
-                                    const val = currentData.motorInputs[m];
-                                    const failed = failures.motorFailures[i];
-                                    return (
-                                      <div key={m} className={`space-y-1 ${failed ? 'opacity-40' : ''}`}>
-                                        <div className="flex items-center justify-between text-xs font-mono">
-                                          <span className={failed ? 'text-destructive' : ''}>{`M${i+1} ${['FL','FR','RL','RR'][i]}`}</span>
-                                          <span>{(val*100).toFixed(1)}%</span>
-                                        </div>
-                                        <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                          <div className="h-full bg-primary rounded-full transition-all duration-100" style={{ width: `${val*100}%` }} />
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
+                    {battery && (
+                      <InspectorSection icon={<BatteryMedium className="h-3.5 w-3.5" />} title="Battery / Powertrain">
+                        <TeleRow label="State of charge" value={`${(battery.soc * 100).toFixed(1)}%`} />
+                        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                          <div className={`h-full rounded-full transition-all ${battery.soc < 0.15 ? 'bg-red-500' : battery.soc < 0.35 ? 'bg-amber-500' : 'bg-emerald-500'}`} style={{ width: `${battery.soc * 100}%` }} />
+                        </div>
+                        <TeleRow label="Voltage" value={`${battery.voltage.toFixed(2)} V`} />
+                        <TeleRow label="Drawn" value={`${(battery.drawnAh * 1000).toFixed(0)} mAh`} />
+                        <TeleRow label="Est. flight time" value={`${battery.flightTimeS.toFixed(0)} s`} />
+                      </InspectorSection>
+                    )}
+
+                    {currentData && (
+                      <InspectorSection icon={<Cpu className="h-3.5 w-3.5" />} title="Motors">
+                        <div className="grid grid-cols-2 gap-2">
+                          {(['motor1', 'motor2', 'motor3', 'motor4'] as const).map((m, i) => {
+                            const val = currentData.motorInputs[m];
+                            const failed = failures.motorFailures[i];
+                            return (
+                              <div key={m} className={failed ? 'opacity-40' : ''}>
+                                <div className="flex justify-between text-[10px] font-mono mb-0.5">
+                                  <span className={failed ? 'text-destructive' : 'text-muted-foreground'}>M{i + 1} {['FL', 'FR', 'RL', 'RR'][i]}</span>
+                                  <span>{(val * 100).toFixed(0)}%</span>
                                 </div>
-                              </CardContent>
-                            </Card>
-                            <Card>
-                              <CardHeader className="pb-2"><CardTitle className="text-xs">Actual Motor Speeds (ESC output)</CardTitle></CardHeader>
-                              <CardContent>
-                                <div className="grid grid-cols-2 gap-2">
-                                  {currentData.motorSpeeds.map((spd, i) => (
-                                    <div key={i} className="space-y-1">
-                                      <div className="flex justify-between text-xs font-mono">
-                                        <span>M{i+1}</span><span>{(spd*100).toFixed(1)}%</span>
-                                      </div>
-                                      <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                        <div className="h-full bg-chart-2 rounded-full transition-all duration-100" style={{ width: `${spd*100}%` }} />
-                                      </div>
-                                    </div>
-                                  ))}
+                                <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                                  <div className="h-full bg-primary rounded-full" style={{ width: `${val * 100}%` }} />
                                 </div>
-                              </CardContent>
-                            </Card>
-                          </>
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </InspectorSection>
+                    )}
 
-                  <TabsContent value="help" className="flex-1 min-h-0 m-0">
-                    <ScrollArea className="h-full">
-                      <div className="p-3 space-y-3 text-xs">
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Quick Start</CardTitle></CardHeader>
-                          <CardContent className="space-y-2 text-muted-foreground">
-                            <p>1. Click <strong>Start</strong> in the PID tab — drone hovers at Z=2m.</p>
-                            <p>2. Adjust <strong>Setpoints</strong> to move the drone to a new position.</p>
-                            <p>3. Use <strong>Plan</strong> tab to define waypoints and click <strong>Mission</strong> mode.</p>
-                            <p>4. Switch to <strong>FPV</strong> camera for the cockpit view.</p>
-                            <p>5. Flip to <strong>RC</strong> tab and press <strong>Manual/Stabilized</strong>, then fly with WASD keys or gamepad.</p>
-                            <p>6. Add wind in the <strong>Env</strong> tab and tune PIDs to reject disturbances.</p>
-                            <p>7. Click the grid to drop waypoints. Use <strong>Export CSV</strong> (↓ button) to download logs.</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Physics</CardTitle></CardHeader>
-                          <CardContent className="space-y-1 text-muted-foreground">
-                            <p>• 6DOF Newton-Euler dynamics, <strong>quaternion attitude</strong> (no gimbal lock)</p>
-                            <p>• Pluggable integrators (RK4 / RK45 / semi-implicit)</p>
-                            <p>• Motor ESC first-order dynamics + <strong>LiPo battery model</strong> (voltage sag, flight time)</p>
-                            <p>• Quadratic aerodynamic drag (body + wind-relative)</p>
-                            <p>• Dryden-style turbulence — <strong>deterministic</strong> (seeded RNG, reproducible runs)</p>
-                            <p>• Ground collision; powered by the headless <strong>@flylab/core</strong> engine</p>
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2"><CardTitle className="text-xs">Control Architecture</CardTitle></CardHeader>
-                          <CardContent className="space-y-1 text-muted-foreground">
-                            <p>• Outer position loop (pos → velocity setpoint)</p>
-                            <p>• Inner velocity loop (vel → attitude command)</p>
-                            <p>• Attitude loop (roll/pitch/yaw PID)</p>
-                            <p>• Altitude hold (independent Z PID)</p>
-                            <p>• All gains tunable live with derivative filter</p>
-                          </CardContent>
-                        </Card>
-                      </div>
-                    </ScrollArea>
-                  </TabsContent>
-                </Tabs>
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          </ResizablePanel>
-        </ResizablePanelGroup>
+                    {metrics && (
+                      <InspectorSection icon={<Gauge className="h-3.5 w-3.5" />} title="Performance">
+                        <TeleRow label="Rise time" value={metrics.altitudeRiseTime != null ? `${metrics.altitudeRiseTime.toFixed(2)} s` : '—'} />
+                        <TeleRow label="Settling" value={metrics.altitudeSettlingTime != null ? `${metrics.altitudeSettlingTime.toFixed(2)} s` : '—'} />
+                        <TeleRow label="Overshoot" value={metrics.altitudeOvershoot != null ? `${metrics.altitudeOvershoot.toFixed(1)}%` : '—'} />
+                        <TeleRow label="Position RMSE" value={`${metrics.positionRMSE.toFixed(3)} m`} />
+                        <TeleRow label="Attitude RMSE" value={`${metrics.attitudeRMSE.toFixed(3)} rad`} />
+                      </InspectorSection>
+                    )}
+
+                    {currentData && (
+                      <InspectorSection icon={<Navigation className="h-3.5 w-3.5" />} title="Setpoints">
+                        <TeleRow label="Target" value={`${currentData.setpoints.position.x.toFixed(1)}, ${currentData.setpoints.position.y.toFixed(1)}, ${currentData.setpoints.position.z.toFixed(1)} m`} />
+                        <TeleRow label="Alt error" value={`${currentData.errors.altitude.toFixed(3)} m`} />
+                      </InspectorSection>
+                    )}
+                  </div>
+                </ScrollArea>
+              </div>
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+
+        {/* ═══ Status bar ════════════════════════════════════════════ */}
+        <footer className="h-7 shrink-0 border-t border-border bg-card/60 backdrop-blur flex items-center gap-3 px-3 text-[11px] font-mono text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span className={`h-1.5 w-1.5 rounded-full ${isRunning ? 'bg-emerald-400' : 'bg-muted-foreground'}`} />
+            {isRunning ? 'RUNNING' : 'PAUSED'}
+          </span>
+          <Separator orientation="vertical" className="h-3.5" />
+          <span className="capitalize">{flightMode.replace(/_/g, ' ')}</span>
+          <Separator orientation="vertical" className="h-3.5" />
+          <span>T {(currentData?.time ?? 0).toFixed(2)}s</span>
+          <span>RTF {simulationConfig.realTimeMultiplier.toFixed(1)}×</span>
+          <span>FPS {fps}</span>
+          <div className="ml-auto flex items-center gap-3">
+            {wind.enabled && <span className="text-cyan-400"><Wind className="h-3 w-3 inline -mt-0.5 mr-0.5" />{wind.speed.toFixed(0)} m/s</span>}
+            {failures.motorFailures.some(Boolean) && <span className="text-destructive">MOTOR FAIL</span>}
+            {gamepadState.connected && <span className="text-emerald-400">GAMEPAD</span>}
+            {keyboardActive && <span className="text-primary">KEYS</span>}
+            <span className="flex items-center gap-1 capitalize">{CAMERA_MODES.find(c => c.id === cameraMode)?.icon}{cameraMode}</span>
+          </div>
+        </footer>
       </div>
-    </div>
+
+      {/* ═══ Command palette ═══════════════════════════════════════ */}
+      <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
+        <CommandInput placeholder="Type a command or search…" />
+        <CommandList>
+          <CommandEmpty>No results found.</CommandEmpty>
+          <CommandGroup heading="Simulation">
+            <CommandItem onSelect={() => runPalette(togglePlay)}>
+              {isRunning ? <Pause className="mr-2 h-4 w-4" /> : <Play className="mr-2 h-4 w-4" />}
+              {isRunning ? 'Pause' : 'Start'} simulation <CommandShortcut>P</CommandShortcut>
+            </CommandItem>
+            <CommandItem onSelect={() => runPalette(handleReset)}>
+              <RotateCcw className="mr-2 h-4 w-4" />Reset <CommandShortcut>R</CommandShortcut>
+            </CommandItem>
+            <CommandItem onSelect={() => runPalette(handleExport)}>
+              <Download className="mr-2 h-4 w-4" />Export flight log (CSV)
+            </CommandItem>
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Flight mode">
+            {FLIGHT_MODES.map(m => (
+              <CommandItem key={m.id} onSelect={() => runPalette(() => handleFlightModeChange(m.id))}>
+                <Plane className="mr-2 h-4 w-4" />{m.label}
+              </CommandItem>
+            ))}
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Camera">
+            {CAMERA_MODES.map(c => (
+              <CommandItem key={c.id} onSelect={() => runPalette(() => setCameraMode(c.id))}>
+                <span className="mr-2">{c.icon}</span>{c.label} view <CommandShortcut>C</CommandShortcut>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Panels">
+            <CommandItem onSelect={() => runPalette(() => togglePanel(leftPanelRef))}><SlidersHorizontal className="mr-2 h-4 w-4" />Toggle tools panel</CommandItem>
+            <CommandItem onSelect={() => runPalette(() => togglePanel(rightPanelRef))}><Activity className="mr-2 h-4 w-4" />Toggle telemetry panel</CommandItem>
+            <CommandItem onSelect={() => runPalette(() => togglePanel(bottomPanelRef))}><Gauge className="mr-2 h-4 w-4" />Toggle charts dock</CommandItem>
+            <CommandItem onSelect={() => runPalette(() => setShortcutsOpen(true))}><Keyboard className="mr-2 h-4 w-4" />Keyboard shortcuts</CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </CommandDialog>
+
+      {/* ═══ Shortcuts dialog ══════════════════════════════════════ */}
+      <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><Keyboard className="h-4 w-4" />Keyboard Shortcuts</DialogTitle></DialogHeader>
+          <div className="space-y-4 text-sm">
+            <ShortcutGroup title="Global" rows={[
+              ['Open command palette', '⌘K / Ctrl K'],
+              ['Start / Pause', 'P'],
+              ['Reset', 'R'],
+              ['Cycle camera', 'C'],
+              ['This dialog', '?'],
+            ]} />
+            <ShortcutGroup title="Manual flight (Manual / Stabilized modes)" rows={[
+              ['Pitch / Roll', 'W A S D  ·  Arrows'],
+              ['Yaw', 'Q / E'],
+              ['Throttle up / down', 'Space / Shift'],
+            ]} />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </TooltipProvider>
   );
 };
+
+// ─── Small presentational helpers ────────────────────────────────────
+const PanelHeader: React.FC<{ icon: React.ReactNode; title: string; onClose: () => void }> = ({ icon, title, onClose }) => (
+  <div className="h-9 shrink-0 px-3 flex items-center gap-2 border-b border-border bg-card/50">
+    <span className="text-primary">{icon}</span>
+    <span className="text-xs font-semibold tracking-wide uppercase text-muted-foreground">{title}</span>
+    <button onClick={onClose} className="ml-auto h-6 w-6 rounded flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted">
+      <ChevronDown className="h-4 w-4" />
+    </button>
+  </div>
+);
+
+const InspectorSection: React.FC<{ icon: React.ReactNode; title: string; children: React.ReactNode }> = ({ icon, title, children }) => (
+  <div className="rounded-lg border border-border bg-card/50 overflow-hidden">
+    <div className="px-2.5 h-8 flex items-center gap-1.5 border-b border-border bg-muted/30">
+      <span className="text-primary">{icon}</span>
+      <span className="text-[11px] font-semibold tracking-wide uppercase text-muted-foreground">{title}</span>
+    </div>
+    <div className="p-2.5 space-y-1.5">{children}</div>
+  </div>
+);
+
+const TeleRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="flex items-center justify-between text-[11px]">
+    <span className="text-muted-foreground">{label}</span>
+    <span className="font-mono text-foreground">{value}</span>
+  </div>
+);
+
+const ShortcutGroup: React.FC<{ title: string; rows: [string, string][] }> = ({ title, rows }) => (
+  <div>
+    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">{title}</div>
+    <div className="space-y-1.5">
+      {rows.map(([label, keys]) => (
+        <div key={label} className="flex items-center justify-between">
+          <span className="text-muted-foreground">{label}</span>
+          <kbd className="px-2 py-0.5 rounded bg-muted border border-border text-[11px] font-mono">{keys}</kbd>
+        </div>
+      ))}
+    </div>
+  </div>
+);
