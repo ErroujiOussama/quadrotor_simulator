@@ -4,12 +4,13 @@
  */
 
 import React from 'react';
-import { DroneState, MotorInputs } from '@/lib/physics/DroneModel';
+import { DroneState } from '@/lib/physics/DroneModel';
 import { FlightMode } from '@/lib/simulation/DroneSimulator';
 
 interface FPVHudProps {
   droneState: DroneState;
-  motorInputs: MotorInputs;
+  /** Per-rotor throttle [0,1]; length = airframe rotor count. */
+  motorThrottles: number[];
   flightMode: FlightMode;
   simTime: number;
 }
@@ -109,7 +110,7 @@ function BarGauge({ value, label, color = '#22c55e' }: { value: number; label: s
   );
 }
 
-export const FPVHud: React.FC<FPVHudProps> = ({ droneState, motorInputs, flightMode, simTime }) => {
+export const FPVHud: React.FC<FPVHudProps> = ({ droneState, motorThrottles, flightMode, simTime }) => {
   const { position, velocity, orientation } = droneState;
   const speed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2);
   const horizontalSpeed = Math.sqrt(velocity.x ** 2 + velocity.y ** 2);
@@ -185,10 +186,7 @@ export const FPVHud: React.FC<FPVHudProps> = ({ droneState, motorInputs, flightM
         background: 'rgba(0,0,0,0.4)', padding: '8px 12px', borderRadius: 8,
         border: '1px solid #22c55e33',
       }}>
-        <BarGauge value={motorInputs.motor1} label="M1" />
-        <BarGauge value={motorInputs.motor2} label="M2" />
-        <BarGauge value={motorInputs.motor3} label="M3" />
-        <BarGauge value={motorInputs.motor4} label="M4" />
+        {motorThrottles.map((v, i) => <BarGauge key={i} value={v} label={`M${i + 1}`} />)}
       </div>
 
       {/* Position readout — bottom left */}

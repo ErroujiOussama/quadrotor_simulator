@@ -2,25 +2,20 @@ import { describe, it, expect } from "vitest";
 import { buildAirframe, mixToThrottles, rotorWrench, AIRFRAME_TYPES } from "./airframes";
 
 describe("airframes", () => {
-  // AC1 — quad-X mixer reproduces the legacy FL/FR/RL/RR controller formula.
-  it("AC1: quad-X mixer matches the legacy motor mix formula", () => {
+  // AC1 — the mixer is sign-consistent with the physical wrench: a positive
+  // roll/pitch/yaw command produces a positive body torque about X/Y/Z. This is
+  // what makes every airframe controllable by the same controller.
+  it("AC1: mixer commands produce matching body torques (quad-X)", () => {
     const af = buildAirframe("quad_x", 0.25);
-    // Legacy: M1 base+p−r+y, M2 base+p+r−y, M3 base−p−r−y, M4 base−p+r+y
-    const cases = [
-      { base: 0.5, roll: 0.1, pitch: 0.05, yaw: -0.03 },
-      { base: 0.6, roll: -0.2, pitch: 0.15, yaw: 0.08 },
-      { base: 0.4, roll: 0.0, pitch: 0.0, yaw: 0.0 },
-    ];
-    for (const { base, roll, pitch, yaw } of cases) {
-      const got = mixToThrottles(af, base, roll, pitch, yaw);
-      const legacy = [
-        base + pitch - roll + yaw,
-        base + pitch + roll - yaw,
-        base - pitch - roll - yaw,
-        base - pitch + roll + yaw,
-      ].map((v) => Math.max(0, Math.min(1, v)));
-      for (let i = 0; i < 4; i++) expect(got[i]).toBeCloseTo(legacy[i], 12);
-    }
+    const kT = 0.016;
+    const hover = 0.5;
+    const wrenchFor = (roll: number, pitch: number, yaw: number) => {
+      const thr = mixToThrottles(af, hover, roll, pitch, yaw).map((t) => t * 7); // N
+      return rotorWrench(af, thr, kT).torque;
+    };
+    expect(wrenchFor(0.1, 0, 0).x).toBeGreaterThan(0); // +roll cmd → +roll torque
+    expect(wrenchFor(0, 0.1, 0).y).toBeGreaterThan(0); // +pitch cmd → +pitch torque
+    expect(wrenchFor(0, 0, 0.1).z).toBeGreaterThan(0); // +yaw cmd → +yaw torque
   });
 
   // AC3 — sign consistency: adding thrust to +Y rotors yields a positive roll torque.

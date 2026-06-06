@@ -56,8 +56,12 @@ export interface BatteryTelemetry {
 export interface SimulationData {
   time: number;
   state: EulerState;
-  motorInputs: MotorInputs;
-  motorSpeeds: [number, number, number, number];
+  /** Per-rotor commanded throttle [0,1]; length = airframe rotor count. */
+  motorThrottles: number[];
+  /** Per-rotor ESC output speed [0,1]; length = airframe rotor count. */
+  motorSpeeds: number[];
+  /** Active airframe id (e.g. "quad_x", "hexa_x"). */
+  airframe: string;
   controlOutputs: ControlOutputs;
   errors: ControlErrors;
   setpoints: SetPoints;

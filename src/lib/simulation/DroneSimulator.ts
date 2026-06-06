@@ -16,8 +16,9 @@ import { Simulation } from "@/core";
 import type {
   SimulationData, SimulationConfig, FlightMode, ManualInputs,
   ControllerConfig, SetPoints, WindConfig, FailureConfig, EulerState,
-  MultirotorParams,
+  RotorCraftParams, AirframeType, AirframeSpec,
 } from "@/core";
+import { buildAirframe } from "@/core";
 import type { DroneParameters } from "@/lib/physics/DroneModel";
 
 // Re-export the types the UI imports from this module's historical path.
@@ -25,6 +26,7 @@ export type {
   SimulationData, SimulationConfig, FlightMode, ManualInputs,
   ControllerConfig, SetPoints,
 } from "@/core";
+export type { AirframeType } from "@/core";
 
 const LEGACY_DEFAULT_PARAMS: DroneParameters = {
   mass: 1.5,
@@ -36,10 +38,10 @@ const LEGACY_DEFAULT_PARAMS: DroneParameters = {
   motorTimeConstant: 0.08,
 };
 
-function toCoreParams(p: Partial<DroneParameters>): Partial<MultirotorParams> {
-  const out: Partial<MultirotorParams> = {};
+/** Map UI drone params to core RotorCraft params (arm length is handled by the airframe). */
+function toCoreParams(p: Partial<DroneParameters>): Partial<RotorCraftParams> {
+  const out: Partial<RotorCraftParams> = {};
   if (p.mass !== undefined) out.mass = p.mass;
-  if (p.length !== undefined) out.armLength = p.length;
   if (p.inertia !== undefined) out.inertia = p.inertia;
   if (p.dragCoeff !== undefined) out.dragCoeff = p.dragCoeff;
   if (p.maxThrust !== undefined) out.maxThrustPerMotor = p.maxThrust;
@@ -63,9 +65,18 @@ export class DroneSimulator {
   private readonly callbackIntervalMs = 1000 / 30;
 
   constructor() {
-    this.sim = new Simulation({ droneParams: toCoreParams(LEGACY_DEFAULT_PARAMS) });
+    this.sim = new Simulation({
+      droneParams: toCoreParams(LEGACY_DEFAULT_PARAMS),
+      armLength: LEGACY_DEFAULT_PARAMS.length,
+      airframe: "quad_x",
+    });
     this.sim.setFlightMode("position_hold");
   }
+
+  /** Switch the airframe (quad/hexa/octo). Preserves the current state. */
+  setAirframe(type: AirframeType) { this.sim.setAirframe(type); }
+  getAirframeType(): AirframeType { return this.sim.getAirframeType(); }
+  getAirframe(): AirframeSpec { return this.sim.getAirframe(); }
 
   /** Shared planner instance — the UI mutates this directly. */
   get waypoints() { return this.sim.waypoints; }
@@ -83,7 +94,10 @@ export class DroneSimulator {
   getManualInputs(): ManualInputs { return this.sim.getManualInputs(); }
   setWind(w: Partial<WindConfig>) { this.sim.setWind(w); }
   setFailures(f: Partial<FailureConfig>) { this.sim.setFailures(f); }
-  updateDroneParameters(p: Partial<DroneParameters>) { this.sim.updateDroneParameters(toCoreParams(p)); }
+  updateDroneParameters(p: Partial<DroneParameters>) {
+    this.sim.updateDroneParameters(toCoreParams(p));
+    if (p.length !== undefined) this.sim.setArmLength(p.length); // arm length lives in the airframe
+  }
 
   getDroneState(): EulerState { return this.sim.getEulerState(); }
   getLatestTrueState(): EulerState | null { return this.latestTrueState; }
@@ -146,10 +160,13 @@ export class DroneSimulator {
 
   /** Export telemetry (including battery channels) as a downloaded CSV. */
   exportCSV() {
+    const hist = this.sim.getDataHistory();
+    const motorCount = hist[0]?.motorThrottles.length ?? this.sim.getAirframe().rotorCount;
+    const motorCols = Array.from({ length: motorCount }, (_, i) => `m${i + 1}`).join(",");
     const header =
-      "time,x,y,z,vx,vy,vz,roll,pitch,yaw,wx,wy,wz,m1,m2,m3,m4," +
+      `time,x,y,z,vx,vy,vz,roll,pitch,yaw,wx,wy,wz,${motorCols},` +
       "alt_err,roll_err,pitch_err,yaw_err,soc,voltage,flight_time_s\n";
-    const rows = this.sim.getDataHistory().map((d) => {
+    const rows = hist.map((d) => {
       const s = d.state;
       return [
         d.time.toFixed(4),
@@ -157,8 +174,7 @@ export class DroneSimulator {
         s.velocity.x.toFixed(4), s.velocity.y.toFixed(4), s.velocity.z.toFixed(4),
         s.orientation.roll.toFixed(4), s.orientation.pitch.toFixed(4), s.orientation.yaw.toFixed(4),
         s.angularVelocity.x.toFixed(4), s.angularVelocity.y.toFixed(4), s.angularVelocity.z.toFixed(4),
-        d.motorInputs.motor1.toFixed(4), d.motorInputs.motor2.toFixed(4),
-        d.motorInputs.motor3.toFixed(4), d.motorInputs.motor4.toFixed(4),
+        ...d.motorThrottles.map((m) => m.toFixed(4)),
         d.errors.altitude.toFixed(4), d.errors.roll.toFixed(4),
         d.errors.pitch.toFixed(4), d.errors.yaw.toFixed(4),
         d.battery.soc.toFixed(4), d.battery.voltage.toFixed(3), d.battery.flightTimeS.toFixed(1),

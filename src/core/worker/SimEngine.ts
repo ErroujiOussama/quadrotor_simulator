@@ -83,11 +83,13 @@ export class SimEngine {
   }
 
   private emptySnapshot(): SimulationData {
+    const n = this.sim.getAirframe().rotorCount;
     return {
       time: 0,
       state: this.sim.getEulerState(),
-      motorInputs: { motor1: 0, motor2: 0, motor3: 0, motor4: 0 },
-      motorSpeeds: [0, 0, 0, 0],
+      motorThrottles: new Array(n).fill(0),
+      motorSpeeds: new Array(n).fill(0),
+      airframe: this.sim.getAirframe().id,
       controlOutputs: { altitude: 0, roll: 0, pitch: 0, yaw: 0, positionX: 0, positionY: 0 },
       errors: { altitude: 0, roll: 0, pitch: 0, yaw: 0, positionX: 0, positionY: 0 },
       setpoints: this.sim.getSetpoints(),

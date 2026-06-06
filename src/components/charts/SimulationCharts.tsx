@@ -112,44 +112,19 @@ export const SimulationCharts: React.FC<SimulationChartsProps> = ({
       },
       motors: {
         labels: times,
-        datasets: [
-          {
-            label: 'Motor 1',
-            data: filteredData.map(d => d.motorInputs.motor1 * 100),
-            borderColor: 'hsl(var(--chart-1))',
-            backgroundColor: 'hsl(var(--chart-1) / 0.1)',
+        // One dataset per rotor — works for quad / hexa / octo alike.
+        datasets: Array.from(
+          { length: filteredData[filteredData.length - 1]?.motorThrottles.length ?? 0 },
+          (_, i) => ({
+            label: `Motor ${i + 1}`,
+            data: filteredData.map(d => (d.motorThrottles[i] ?? 0) * 100),
+            borderColor: `hsl(var(--chart-${(i % 5) + 1}))`,
+            backgroundColor: `hsl(var(--chart-${(i % 5) + 1}) / 0.1)`,
             tension: 0.4,
             pointRadius: 0,
             borderWidth: 1
-          },
-          {
-            label: 'Motor 2',
-            data: filteredData.map(d => d.motorInputs.motor2 * 100),
-            borderColor: 'hsl(var(--chart-2))',
-            backgroundColor: 'hsl(var(--chart-2) / 0.1)',
-            tension: 0.4,
-            pointRadius: 0,
-            borderWidth: 1
-          },
-          {
-            label: 'Motor 3',
-            data: filteredData.map(d => d.motorInputs.motor3 * 100),
-            borderColor: 'hsl(var(--chart-3))',
-            backgroundColor: 'hsl(var(--chart-3) / 0.1)',
-            tension: 0.4,
-            pointRadius: 0,
-            borderWidth: 1
-          },
-          {
-            label: 'Motor 4',
-            data: filteredData.map(d => d.motorInputs.motor4 * 100),
-            borderColor: 'hsl(var(--chart-4))',
-            backgroundColor: 'hsl(var(--chart-4) / 0.1)',
-            tension: 0.4,
-            pointRadius: 0,
-            borderWidth: 1
-          }
-        ]
+          })
+        )
       },
       errors: {
         labels: times,

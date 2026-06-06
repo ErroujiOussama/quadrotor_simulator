@@ -45,6 +45,30 @@ describe("Simulation", () => {
     expect(d.battery.flightTimeS).toBeGreaterThan(0);
   });
 
+  it("flies a hexa airframe and reports 6 motors", () => {
+    const sim = new Simulation({ seed: 2, airframe: "hexa_x" });
+    sim.setFlightMode("position_hold");
+    sim.setSetpoints({ position: { x: 0, y: 0, z: 4 } });
+    sim.run(4000);
+    const d = sim.getCurrentData()!;
+    expect(d.motorThrottles.length).toBe(6);
+    expect(d.airframe).toBe("hexa_x");
+    expect(Math.abs(d.state.position.z - 4)).toBeLessThan(0.3);
+  });
+
+  it("switches airframe at runtime (quad → octo) and keeps flying", () => {
+    const sim = new Simulation({ seed: 5 });
+    sim.setFlightMode("position_hold");
+    sim.setSetpoints({ position: { x: 0, y: 0, z: 3 } });
+    sim.run(1000);
+    expect(sim.getCurrentData()!.motorThrottles.length).toBe(4);
+    sim.setAirframe("octo_x");
+    sim.run(2000);
+    const d = sim.getCurrentData()!;
+    expect(d.motorThrottles.length).toBe(8);
+    expect(Number.isFinite(d.state.position.z)).toBe(true);
+  });
+
   it("computes altitude step-response metrics", () => {
     const sim = new Simulation({ seed: 1 });
     sim.setFlightMode("position_hold");

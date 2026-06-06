@@ -10,7 +10,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { DroneSimulator, SimulationData, FlightMode, ManualInputs, ControllerConfig, SetPoints, SimulationConfig } from '@/lib/simulation/DroneSimulator';
+import { DroneSimulator, SimulationData, FlightMode, ManualInputs, ControllerConfig, SetPoints, SimulationConfig, AirframeType } from '@/lib/simulation/DroneSimulator';
 import { DroneState } from '@/lib/physics/DroneModel';
 import { WindConfig, FailureConfig, DroneParameters } from '@/lib/physics/DroneModel';
 import { DroneVisualization, CameraMode } from './DroneVisualization';
@@ -49,6 +49,13 @@ const FLIGHT_MODES: { id: FlightMode; short: string; label: string }[] = [
   { id: 'mission', short: 'MISN', label: 'Mission' },
 ];
 
+const AIRFRAMES: { id: AirframeType; label: string }[] = [
+  { id: 'quad_x', label: 'Quad X' },
+  { id: 'quad_plus', label: 'Quad +' },
+  { id: 'hexa_x', label: 'Hexa X' },
+  { id: 'octo_x', label: 'Octo X' },
+];
+
 const CAMERA_MODES: { id: CameraMode; icon: React.ReactNode; label: string }[] = [
   { id: 'orbit', icon: <Eye className="h-3.5 w-3.5" />, label: 'Orbit' },
   { id: 'follow', icon: <Camera className="h-3.5 w-3.5" />, label: 'Follow' },
@@ -77,6 +84,7 @@ export const DroneSimulationInterface: React.FC = () => {
   const [flightMode, setFlightMode] = useState<FlightMode>('position_hold');
   const [manualInputs, setManualInputs] = useState<ManualInputs>({ pitch: 0, roll: 0, yaw: 0, throttle: 0.5 });
   const [cameraMode, setCameraMode] = useState<CameraMode>('orbit');
+  const [airframe, setAirframe] = useState<AirframeType>('quad_x');
   const [missionTick, setMissionTick] = useState(0); // force re-render on mission change
 
   // ─── Shell state ───────────────────────────────────────────────────
@@ -275,6 +283,12 @@ export const DroneSimulationInterface: React.FC = () => {
 
   const handleMissionChange = useCallback(() => { setMissionTick(t => t + 1); }, []);
 
+  const handleAirframeChange = useCallback((type: AirframeType) => {
+    simulatorRef.current?.setAirframe(type);
+    setAirframe(type);
+    simulatorRef.current?.reset(); // clear telemetry of the previous rotor count
+  }, []);
+
   // ─── Panel collapse helpers ────────────────────────────────────────
   const togglePanel = (ref: React.RefObject<ImperativePanelHandle>) => {
     const p = ref.current; if (!p) return;
@@ -385,6 +399,25 @@ export const DroneSimulationInterface: React.FC = () => {
               </button>
             ))}
           </div>
+
+          <Separator orientation="vertical" className="h-6" />
+
+          {/* Airframe selector */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex items-center gap-1.5">
+                <Plane className="h-3.5 w-3.5 text-muted-foreground" />
+                <select
+                  value={airframe}
+                  onChange={(e) => handleAirframeChange(e.target.value as AirframeType)}
+                  className="h-8 rounded-md border border-border bg-background/50 px-2 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  {AIRFRAMES.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                </select>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>Airframe (resets the sim)</TooltipContent>
+          </Tooltip>
 
           {/* Right cluster */}
           <div className="ml-auto flex items-center gap-2">
@@ -543,7 +576,7 @@ export const DroneSimulationInterface: React.FC = () => {
                     {isFPV && currentData && (
                       <FPVHud
                         droneState={droneState}
-                        motorInputs={currentData.motorInputs}
+                        motorThrottles={currentData.motorThrottles}
                         flightMode={flightMode}
                         simTime={currentData.time}
                       />
@@ -652,13 +685,13 @@ export const DroneSimulationInterface: React.FC = () => {
                     {currentData && (
                       <InspectorSection icon={<Cpu className="h-3.5 w-3.5" />} title="Motors">
                         <div className="grid grid-cols-2 gap-2">
-                          {(['motor1', 'motor2', 'motor3', 'motor4'] as const).map((m, i) => {
-                            const val = currentData.motorInputs[m];
+                          {currentData.motorThrottles.map((val, i) => {
                             const failed = failures.motorFailures[i];
+                            const quadLabel = currentData.motorThrottles.length === 4 ? ['FL', 'FR', 'RL', 'RR'][i] : '';
                             return (
-                              <div key={m} className={failed ? 'opacity-40' : ''}>
+                              <div key={i} className={failed ? 'opacity-40' : ''}>
                                 <div className="flex justify-between text-[10px] font-mono mb-0.5">
-                                  <span className={failed ? 'text-destructive' : 'text-muted-foreground'}>M{i + 1} {['FL', 'FR', 'RL', 'RR'][i]}</span>
+                                  <span className={failed ? 'text-destructive' : 'text-muted-foreground'}>M{i + 1} {quadLabel}</span>
                                   <span>{(val * 100).toFixed(0)}%</span>
                                 </div>
                                 <div className="h-1.5 bg-muted rounded-full overflow-hidden">

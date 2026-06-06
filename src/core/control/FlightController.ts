@@ -146,9 +146,36 @@ export class FlightController {
   }
 
   /**
-   * Mix control outputs + manual inputs into [FL, FR, RL, RR] throttles.
-   * `hoverThrottle` is the per-motor throttle that balances gravity — used as a
-   * feed-forward in the altitude-stabilized modes so the PID only trims around it.
+   * Per-mode control axes {base throttle, roll, pitch, yaw} before airframe
+   * mixing. `hoverThrottle` is the per-motor throttle that balances gravity,
+   * used as a feed-forward in altitude-stabilized modes. An airframe's mixer
+   * (mixToThrottles) maps these axes to per-rotor throttles — this is what lets
+   * one controller drive quad / hexa / octo alike.
+   */
+  axes(
+    mode: FlightMode,
+    ctrl: ControlOutputs,
+    manual: ManualInputs,
+    hoverThrottle: number,
+  ): { base: number; roll: number; pitch: number; yaw: number } {
+    const { altitude, roll, pitch, yaw } = ctrl;
+    switch (mode) {
+      case "manual":
+        return { base: manual.throttle, roll: manual.roll * 0.3, pitch: manual.pitch * 0.3, yaw: manual.yaw * 0.3 };
+      case "stabilized":
+        return { base: manual.throttle, roll: roll + manual.roll * 0.2, pitch: pitch + manual.pitch * 0.2, yaw: yaw + manual.yaw * 0.2 };
+      case "altitude_hold":
+        return { base: hoverThrottle + altitude, roll: manual.roll * 0.25, pitch: manual.pitch * 0.25, yaw: yaw + manual.yaw * 0.2 };
+      case "position_hold":
+      case "mission":
+      default:
+        return { base: hoverThrottle + altitude, roll, pitch, yaw };
+    }
+  }
+
+  /**
+   * Legacy X-quad motor mix (kept for reference/back-compat). New code uses
+   * `axes()` + an airframe mixer.
    */
   mix(
     mode: FlightMode,
@@ -156,29 +183,7 @@ export class FlightController {
     manual: ManualInputs,
     hoverThrottle: number,
   ): [number, number, number, number] {
-    const { altitude, roll, pitch, yaw } = ctrl;
-    let base: number, r: number, p: number, y: number;
-
-    switch (mode) {
-      case "manual":
-        base = manual.throttle;
-        r = manual.roll * 0.3; p = manual.pitch * 0.3; y = manual.yaw * 0.3;
-        break;
-      case "stabilized":
-        base = manual.throttle;
-        r = roll + manual.roll * 0.2; p = pitch + manual.pitch * 0.2; y = yaw + manual.yaw * 0.2;
-        break;
-      case "altitude_hold":
-        base = hoverThrottle + altitude;
-        r = manual.roll * 0.25; p = manual.pitch * 0.25; y = yaw + manual.yaw * 0.2;
-        break;
-      case "position_hold":
-      case "mission":
-      default:
-        base = hoverThrottle + altitude;
-        r = roll; p = pitch; y = yaw;
-        break;
-    }
+    const { base, roll: r, pitch: p, yaw: y } = this.axes(mode, ctrl, manual, hoverThrottle);
 
     const c = (v: number) => clamp(v, 0, 1);
     // X-config: M1=FL(CCW) M2=FR(CW) M3=RL(CW) M4=RR(CCW)

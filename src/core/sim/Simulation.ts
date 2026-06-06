@@ -3,9 +3,14 @@
  * and environment, and advances them at a fixed timestep. No timers, no rAF, no
  * DOM: callers (a Web Worker, a rAF loop, or a Node batch script) drive it by
  * calling step(). This is what makes runs reproducible and testable.
+ *
+ * The vehicle is a generalized RotorCraft (spec 002): the airframe (quad/hexa/
+ * octo/…) can be switched at runtime, and the controller's axes are mapped to
+ * per-rotor throttles by the airframe's mixer.
  */
 import { SeededRng } from "../rng/SeededRng";
-import { Multirotor, MultirotorParams, DEFAULT_MULTIROTOR } from "../vehicles/Multirotor";
+import { RotorCraft, RotorCraftParams } from "../vehicles/RotorCraft";
+import { AirframeSpec, AirframeType, buildAirframe, mixToThrottles } from "../vehicles/airframes";
 import { Environment, WindConfig } from "../physics/Environment";
 import {
   FlightController, FlightMode, ManualInputs, ControllerConfig,
@@ -14,7 +19,7 @@ import {
 import { WaypointPlanner } from "../mission/WaypointPlanner";
 import { IntegratorName } from "../physics/integrators";
 import {
-  SimulationConfig, SimulationData, EulerState, FailureConfig, MotorInputs,
+  SimulationConfig, SimulationData, EulerState, FailureConfig,
   PerformanceMetrics, BatteryTelemetry, DEFAULT_SIM_CONFIG, DEFAULT_FAILURES,
 } from "./types";
 
@@ -22,8 +27,10 @@ export interface SimulationOptions {
   seed?: number;
   config?: Partial<SimulationConfig>;
   controllerConfig?: ControllerConfig;
-  droneParams?: Partial<MultirotorParams>;
+  droneParams?: Partial<RotorCraftParams>;
   integrator?: IntegratorName;
+  airframe?: AirframeType;
+  armLength?: number;
 }
 
 const ZERO_OUTPUTS: ControlOutputs = { altitude: 0, roll: 0, pitch: 0, yaw: 0, positionX: 0, positionY: 0 };
@@ -31,9 +38,15 @@ const ZERO_OUTPUTS: ControlOutputs = { altitude: 0, roll: 0, pitch: 0, yaw: 0, p
 export class Simulation {
   readonly waypoints = new WaypointPlanner();
   private rng: SeededRng;
-  private drone: Multirotor;
+  private drone: RotorCraft;
   private controller: FlightController;
   private env: Environment;
+
+  private airframe: AirframeSpec;
+  private airframeType: AirframeType;
+  private armLength: number;
+  private droneParams: Partial<RotorCraftParams>;
+  private integrator: IntegratorName;
 
   private config: SimulationConfig;
   private failures: FailureConfig = { ...DEFAULT_FAILURES };
@@ -50,9 +63,25 @@ export class Simulation {
     this.seed = opts.seed ?? 12345;
     this.rng = new SeededRng(this.seed);
     this.config = { ...DEFAULT_SIM_CONFIG, ...opts.config };
-    this.drone = new Multirotor({ params: opts.droneParams, integrator: opts.integrator ?? "rk4" });
+    this.airframeType = opts.airframe ?? "quad_x";
+    this.armLength = opts.armLength ?? 0.25;
+    this.droneParams = { ...opts.droneParams };
+    this.integrator = opts.integrator ?? "rk4";
+    this.airframe = buildAirframe(this.airframeType, this.armLength);
+    this.drone = new RotorCraft({ airframe: this.airframe, params: this.droneParams, integrator: this.integrator });
     this.controller = new FlightController(opts.controllerConfig ?? DEFAULT_CONTROLLER_CONFIG);
     this.env = new Environment(this.rng);
+  }
+
+  private rebuildDrone(initial?: Partial<RotorCraft["state"]>) {
+    this.airframe = buildAirframe(this.airframeType, this.armLength);
+    this.drone = new RotorCraft({
+      airframe: this.airframe,
+      params: this.droneParams,
+      integrator: this.integrator,
+      initialState: initial,
+    });
+    this.drone.setMotorFailures(this.failures.motorFailures);
   }
 
   // ── Configuration ──────────────────────────────────────────────
@@ -76,11 +105,23 @@ export class Simulation {
     this.failures = { ...this.failures, ...f };
     this.drone.setMotorFailures(this.failures.motorFailures);
   }
-  updateDroneParameters(p: Partial<MultirotorParams>) { this.drone.setParams(p); }
-  setIntegrator(name: IntegratorName) { this.drone.setIntegrator(name); }
+  updateDroneParameters(p: Partial<RotorCraftParams>) {
+    this.droneParams = { ...this.droneParams, ...p };
+    this.drone.setParams(p);
+  }
+  setIntegrator(name: IntegratorName) { this.integrator = name; this.rebuildDrone(this.drone.state); }
+
+  /** Switch airframe (quad/hexa/octo). Preserves the current rigid-body state. */
+  setAirframe(type: AirframeType, armLength?: number) {
+    this.airframeType = type;
+    if (armLength !== undefined) this.armLength = armLength;
+    this.rebuildDrone(this.drone.state);
+  }
+  getAirframeType(): AirframeType { return this.airframeType; }
+  getAirframe(): AirframeSpec { return this.airframe; }
+  setArmLength(arm: number) { this.armLength = arm; this.rebuildDrone(this.drone.state); }
 
   // ── State access ───────────────────────────────────────────────
-  /** True Euler-view state (no sensor noise) for display/logging. */
   getEulerState(): EulerState { return this.toEuler(); }
   getCurrentData(): SimulationData | null { return this.history[this.history.length - 1] ?? null; }
   getDataHistory(): SimulationData[] { return this.history; }
@@ -88,18 +129,17 @@ export class Simulation {
 
   private toEuler(): EulerState {
     const s = this.drone.state;
-    const e = s.attitude.toEuler();
     return {
       position: s.position.toObject(),
       velocity: s.velocity.toObject(),
-      orientation: e,
+      orientation: s.attitude.toEuler(),
       angularVelocity: s.angularVel.toObject(),
     };
   }
 
   private batteryTelemetry(): BatteryTelemetry {
     const speeds = this.drone.getMotorSpeeds();
-    const frac = (speeds[0] + speeds[1] + speeds[2] + speeds[3]) / 4;
+    const frac = speeds.reduce((a, b) => a + b, 0) / Math.max(1, speeds.length);
     const current = frac * this.drone.getParams().maxCurrentA;
     return {
       soc: this.drone.battery.getSoc(),
@@ -110,14 +150,12 @@ export class Simulation {
   }
 
   // ── Stepping ───────────────────────────────────────────────────
-  /** Advance one fixed timestep (uses config.timestep). */
   step(): void {
     const dt = this.config.timestep;
     const euler = this.drone.state.attitude.toEuler();
     const truePos = this.drone.state.position;
-
-    // Sensor noise on the position the controller sees (deterministic via RNG).
     const n = this.failures.sensorNoise;
+
     const sensed = {
       position: n > 0
         ? { x: truePos.x + (this.rng.next() - 0.5) * 2 * n, y: truePos.y + (this.rng.next() - 0.5) * 2 * n, z: truePos.z + (this.rng.next() - 0.5) * 2 * n }
@@ -126,25 +164,27 @@ export class Simulation {
       euler,
     };
 
-    // Mission: drive setpoints from the active waypoint.
     if (this.flightMode === "mission") {
       const target = this.waypoints.update(sensed.position, dt);
       if (target) this.setpoints.position = { ...target };
     }
 
-    let ctrl: ControlOutputs;
-    let cmd: [number, number, number, number];
-
+    const rotorCount = this.drone.actuatorCount;
     const hover = this.drone.hoverThrottle();
+    let ctrl: ControlOutputs;
+    let cmd: number[];
+
     if (this.config.enableControl && this.flightMode !== "manual") {
       ctrl = this.controller.control(sensed, this.setpoints, dt);
-      cmd = this.controller.mix(this.flightMode, ctrl, this.manualInputs, hover);
+      const a = this.controller.axes(this.flightMode, ctrl, this.manualInputs, hover);
+      cmd = mixToThrottles(this.airframe, a.base, a.roll, a.pitch, a.yaw);
     } else if (this.flightMode === "manual") {
       ctrl = ZERO_OUTPUTS;
-      cmd = this.controller.mix("manual", ctrl, this.manualInputs, hover);
+      const a = this.controller.axes("manual", ctrl, this.manualInputs, hover);
+      cmd = mixToThrottles(this.airframe, a.base, a.roll, a.pitch, a.yaw);
     } else {
       ctrl = ZERO_OUTPUTS;
-      cmd = [0.6, 0.6, 0.6, 0.6];
+      cmd = new Array(rotorCount).fill(0.6);
     }
 
     const errors = (this.config.enableControl && this.flightMode !== "manual")
@@ -157,14 +197,12 @@ export class Simulation {
       this.drone.step(dt, wind);
     }
 
-    const speeds = this.drone.getMotorSpeeds();
-    const motorInputs: MotorInputs = { motor1: cmd[0], motor2: cmd[1], motor3: cmd[2], motor4: cmd[3] };
-
     const data: SimulationData = {
       time: this.currentTime,
       state: this.toEuler(),
-      motorInputs,
-      motorSpeeds: speeds,
+      motorThrottles: cmd,
+      motorSpeeds: this.drone.getMotorSpeeds(),
+      airframe: this.airframe.id,
       controlOutputs: ctrl,
       errors,
       setpoints: structuredClone(this.setpoints),
@@ -179,7 +217,6 @@ export class Simulation {
     this.currentTime += dt;
   }
 
-  /** Run N steps (batch/headless use). */
   run(steps: number): void {
     for (let i = 0; i < steps; i++) this.step();
   }
@@ -187,8 +224,7 @@ export class Simulation {
   reset() {
     this.rng = new SeededRng(this.seed);
     this.env = new Environment(this.rng);
-    this.drone.reset();
-    this.drone.setMotorFailures(this.failures.motorFailures);
+    this.rebuildDrone();
     this.controller.reset();
     this.currentTime = 0;
     this.history = [];
@@ -208,7 +244,6 @@ export class Simulation {
       recent.reduce((s, d) => s + d.errors.roll ** 2 + d.errors.pitch ** 2, 0) / (recent.length * 2),
     );
 
-    // Altitude step-response metrics relative to the current Z setpoint.
     const target = this.setpoints.position.z;
     const startZ = this.history[0].state.position.z;
     const span = target - startZ;
