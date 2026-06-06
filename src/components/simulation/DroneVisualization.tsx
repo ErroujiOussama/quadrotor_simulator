@@ -9,6 +9,7 @@ import * as THREE from 'three';
 import { DroneState } from '@/lib/physics/DroneModel';
 import { Waypoint, MissionState } from '@/lib/mission/WaypointPlanner';
 import { WindConfig } from '@/lib/physics/DroneModel';
+import { buildDrone, buildEnvironment, type Propeller } from './droneScene';
 
 export type CameraMode = 'orbit' | 'follow' | 'fpv';
 
@@ -39,7 +40,9 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     camera: THREE.PerspectiveCamera;
     renderer: THREE.WebGLRenderer;
     droneGroup: THREE.Group;
-    propellers: THREE.Mesh[];
+    propellers: Propeller[];
+    spinRate: number;
+    envDispose?: () => void;
     // Trajectory ring buffer
     trailPoints: Float32Array;
     trailGeo: THREE.BufferGeometry;
@@ -167,8 +170,6 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     const h = mountRef.current.clientHeight;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a);
-    scene.fog = new THREE.FogExp2(0x0f172a, 0.025);
 
     const camera = new THREE.PerspectiveCamera(70, w / h, 0.01, 500);
     camera.position.set(6, 5, 6);
@@ -180,36 +181,12 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
+    renderer.toneMappingExposure = 1.05;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
     mountRef.current.appendChild(renderer.domElement);
 
-    // Lighting
-    scene.add(new THREE.AmbientLight(0x334155, 1.5));
-    const sun = new THREE.DirectionalLight(0xffffff, 2);
-    sun.position.set(15, 20, 10);
-    sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 0.1; sun.shadow.camera.far = 100;
-    sun.shadow.camera.left = -20; sun.shadow.camera.right = 20;
-    sun.shadow.camera.top = 20; sun.shadow.camera.bottom = -20;
-    scene.add(sun);
-    const fill = new THREE.PointLight(0x3b82f6, 1, 20);
-    fill.position.set(-5, 3, -5);
-    scene.add(fill);
-
-    // Ground plane
-    const groundGeo = new THREE.PlaneGeometry(50, 50);
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9, metalness: 0.0 });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    scene.add(ground);
-
-    // Grid
-    const grid = new THREE.GridHelper(50, 50, 0x1e40af, 0x1e3a6e);
-    grid.position.y = 0.001;
-    scene.add(grid);
+    // Realistic daylight environment (sky, IBL, sun + soft shadows, ground).
+    const envDispose = buildEnvironment(scene, renderer);
 
     // Invisible ground for raycasting clicks
     const pickGeo = new THREE.PlaneGeometry(100, 100);
@@ -218,77 +195,8 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     groundPlane.rotation.x = -Math.PI / 2;
     scene.add(groundPlane);
 
-    // ─── Drone model ──────────────────────────────────────────────────
-    const droneGroup = new THREE.Group();
-
-    // Central body (box)
-    const bodyGeo = new THREE.BoxGeometry(0.06, 0.025, 0.06);
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0ea5e9, metalness: 0.6, roughness: 0.3 });
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.castShadow = true;
-    droneGroup.add(body);
-
-    // Arms (4 cylinders in X config, diagonal)
-    const armMat = new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.4, roughness: 0.5 });
-    const armAngles = [45, -45, 135, -135];
-    const armLength = 0.28;
-    const propellers: THREE.Mesh[] = [];
-
-    armAngles.forEach((angleDeg, i) => {
-      const angleRad = angleDeg * Math.PI / 180;
-      const armGeo = new THREE.CylinderGeometry(0.008, 0.008, armLength, 8);
-      const arm = new THREE.Mesh(armGeo, armMat);
-      arm.rotation.z = Math.PI / 2;
-      arm.rotation.y = angleRad;
-      arm.position.set(Math.cos(angleRad) * armLength / 2, 0, Math.sin(angleRad) * armLength / 2);
-      arm.castShadow = true;
-      droneGroup.add(arm);
-
-      // Motor housing
-      const motorGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.02, 12);
-      const motorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.8, roughness: 0.2 });
-      const motorMesh = new THREE.Mesh(motorGeo, motorMat);
-      motorMesh.position.set(Math.cos(angleRad) * armLength, 0.01, Math.sin(angleRad) * armLength);
-      droneGroup.add(motorMesh);
-
-      // Propeller
-      const propGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.006, 32);
-      const propMat = new THREE.MeshStandardMaterial({
-        color: i % 2 === 0 ? 0x22c55e : 0xf59e0b,
-        transparent: true, opacity: 0.75,
-        metalness: 0.1, roughness: 0.5,
-      });
-      const prop = new THREE.Mesh(propGeo, propMat);
-      prop.position.set(Math.cos(angleRad) * armLength, 0.018, Math.sin(angleRad) * armLength);
-      droneGroup.add(prop);
-      propellers.push(prop);
-    });
-
-    // Forward direction indicator (red arrow on nose)
-    const arrowGeo = new THREE.ConeGeometry(0.018, 0.06, 8);
-    const arrowMat = new THREE.MeshStandardMaterial({ color: 0xef4444 });
-    const arrow = new THREE.Mesh(arrowGeo, arrowMat);
-    arrow.position.set(0.12, 0, 0);
-    arrow.rotation.z = -Math.PI / 2;
-    droneGroup.add(arrow);
-
-    // LEDs on arms
-    const ledPositions = armAngles.map(deg => {
-      const a = deg * Math.PI / 180;
-      return { x: Math.cos(a) * armLength, z: Math.sin(a) * armLength };
-    });
-    ledPositions.forEach((pos, i) => {
-      const ledGeo = new THREE.SphereGeometry(0.012, 8, 8);
-      const ledMat = new THREE.MeshStandardMaterial({
-        color: i < 2 ? 0xffffff : 0xff4444,
-        emissive: i < 2 ? 0xffffff : 0xff4444,
-        emissiveIntensity: 2,
-      });
-      const led = new THREE.Mesh(ledGeo, ledMat);
-      led.position.set(pos.x, 0.02, pos.z);
-      droneGroup.add(led);
-    });
-
+    // ─── Realistic drone model ────────────────────────────────────────
+    const { group: droneGroup, propellers } = buildDrone();
     scene.add(droneGroup);
 
     // ─── Trajectory trail (ring buffer as line strip) ──────────────
@@ -306,7 +214,7 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
 
     sceneDataRef.current = {
       scene, camera, renderer,
-      droneGroup, propellers,
+      droneGroup, propellers, spinRate: 0, envDispose,
       trailPoints, trailGeo, trailLine, trailHead: 0, trailCount: 0,
       waypointGroup, pathLine: null, windArrow: null,
       groundPlane,
@@ -456,8 +364,18 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
       }
       // 'orbit' mode camera updated by mouse events only
 
-      // Spin propellers (faster = more thrust visual feedback)
-      props.forEach((p, i) => { p.rotation.y += (i % 2 === 0 ? 0.4 : -0.4); });
+      // Spin propellers: ramp RPM up while flying, decay when idle. At high
+      // RPM the blades fade and the motion-blur disc fades in (like a real prop).
+      const targetSpin = state ? 1 : 0;
+      sd.spinRate += (targetSpin - sd.spinRate) * 0.06;
+      const rate = sd.spinRate;
+      const blur = Math.min(1, Math.max(0, (rate - 0.35) / 0.5)); // 0→1 as it spins up
+      props.forEach((p) => {
+        p.pivot.rotation.y += p.dir * (0.15 + rate * 1.2);
+        p.discMat.opacity = blur * 0.9;
+        p.bladeMat.opacity = 1 - blur * 0.85;
+        p.bladeMat.transparent = blur > 0.01;
+      });
 
       rend.render(sc, cam);
       sd.frameId = requestAnimationFrame(animate);
@@ -467,6 +385,7 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     return () => {
       const sd = sceneDataRef.current;
       if (sd?.frameId) cancelAnimationFrame(sd.frameId);
+      sd?.envDispose?.();
       renderer.domElement.removeEventListener('mousedown', onMouseDown);
       renderer.domElement.removeEventListener('mousedown', onMouseDownClick);
       renderer.domElement.removeEventListener('mouseup', onMouseUpClick);
