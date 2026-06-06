@@ -4,8 +4,8 @@
  */
 
 import React from 'react';
-import { DroneState } from '@/lib/physics/DroneModel';
-import { MotorInputs, FlightMode } from '@/lib/simulation/DroneSimulator';
+import { DroneState, MotorInputs } from '@/lib/physics/DroneModel';
+import { FlightMode } from '@/lib/simulation/DroneSimulator';
 
 interface FPVHudProps {
   droneState: DroneState;

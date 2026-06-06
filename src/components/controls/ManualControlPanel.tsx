@@ -27,10 +27,12 @@ interface ManualControlPanelProps {
   onResetInputs: () => void;
 }
 
-const modeColor = (m: FlightMode): 'destructive' | 'secondary' | 'default' | 'outline' => ({
-  manual: 'destructive', stabilized: 'outline', altitude_hold: 'secondary',
-  position_hold: 'default', mission: 'default',
-}[m] as any);
+const modeColor = (m: FlightMode): 'destructive' | 'secondary' | 'default' | 'outline' => (
+  {
+    manual: 'destructive', stabilized: 'outline', altitude_hold: 'secondary',
+    position_hold: 'default', mission: 'default',
+  } as const
+)[m];
 
 const modeDesc = (m: FlightMode) => ({
   manual: 'Full manual — no stabilization. Challenging but educational.',

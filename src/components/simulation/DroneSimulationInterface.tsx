@@ -25,7 +25,7 @@ import { useGamepad, applyGamepadInputs } from '@/hooks/useGamepad';
 import { createWaypoint } from '@/lib/mission/WaypointPlanner';
 import {
   Activity, BarChart3, Settings, Monitor, BookOpen, Zap,
-  MapPin, Wind, Gamepad2, Eye, EyeOff, Camera, Navigation, Crosshair
+  MapPin, Wind, Gamepad2, Eye, EyeOff, Camera, Navigation, Crosshair, BatteryMedium
 } from 'lucide-react';
 
 export const DroneSimulationInterface: React.FC = () => {
@@ -221,6 +221,7 @@ export const DroneSimulationInterface: React.FC = () => {
   };
 
   const sim = simulatorRef.current;
+  const metrics = currentData ? sim?.getMetrics() : undefined;
   const waypoints = sim ? sim.waypoints.getWaypoints() : [];
   const missionState = sim ? sim.waypoints.getMissionState() : { status: 'idle' as const, currentWaypointIndex: 0, holdTimer: 0, distanceToNext: 0, totalWaypoints: 0, looping: false };
 
@@ -236,8 +237,9 @@ export const DroneSimulationInterface: React.FC = () => {
         <div className="px-4 flex h-14 items-center gap-4">
           <div className="flex items-center gap-2">
             <Zap className="h-5 w-5 text-primary" />
-            <h1 className="text-lg font-bold tracking-tight">Quadrotor Simulator</h1>
-            <Badge variant="secondary" className="text-[10px]">v2.0</Badge>
+            <h1 className="text-lg font-bold tracking-tight">FlyLab</h1>
+            <Badge variant="secondary" className="text-[10px]">core v0.1</Badge>
+            <span className="hidden md:inline text-[10px] text-muted-foreground">Advanced Flight Simulator</span>
           </div>
 
           <div className="flex items-center gap-3 ml-auto text-xs font-mono">
@@ -251,6 +253,19 @@ export const DroneSimulationInterface: React.FC = () => {
                   </span>
                 </span>
               </>
+            )}
+            {currentData && (
+              <Badge
+                variant="outline"
+                className={
+                  currentData.battery.soc < 0.15 ? 'text-red-500'
+                  : currentData.battery.soc < 0.35 ? 'text-amber-500'
+                  : 'text-emerald-500'
+                }
+              >
+                <BatteryMedium className="h-3 w-3 mr-1" />
+                {(currentData.battery.soc * 100).toFixed(0)}% · {currentData.battery.voltage.toFixed(1)}V
+              </Badge>
             )}
             <Badge variant={isRunning ? 'default' : 'secondary'}>{isRunning ? 'Running' : 'Paused'}</Badge>
             <Badge variant="outline" className="capitalize">{flightMode.replace(/_/g, ' ')}</Badge>
@@ -491,6 +506,27 @@ export const DroneSimulationInterface: React.FC = () => {
                                 <div>Y: {currentData.errors.positionY.toFixed(4)} m</div>
                               </CardContent>
                             </Card>
+                            <Card>
+                              <CardHeader className="pb-2"><CardTitle className="text-xs">Battery / Powertrain</CardTitle></CardHeader>
+                              <CardContent className="text-xs font-mono space-y-1">
+                                <div>SoC: <span className="text-foreground">{(currentData.battery.soc * 100).toFixed(1)}%</span></div>
+                                <div>Voltage: <span className="text-foreground">{currentData.battery.voltage.toFixed(2)} V</span></div>
+                                <div>Drawn: <span className="text-foreground">{(currentData.battery.drawnAh * 1000).toFixed(0)} mAh</span></div>
+                                <div>Est. flight time: <span className="text-foreground">{currentData.battery.flightTimeS.toFixed(0)} s</span></div>
+                              </CardContent>
+                            </Card>
+                            {metrics && (
+                              <Card>
+                                <CardHeader className="pb-2"><CardTitle className="text-xs">Performance Metrics</CardTitle></CardHeader>
+                                <CardContent className="text-xs font-mono space-y-1">
+                                  <div>Rise time: <span className="text-foreground">{metrics.altitudeRiseTime != null ? `${metrics.altitudeRiseTime.toFixed(2)} s` : '—'}</span></div>
+                                  <div>Settling: <span className="text-foreground">{metrics.altitudeSettlingTime != null ? `${metrics.altitudeSettlingTime.toFixed(2)} s` : '—'}</span></div>
+                                  <div>Overshoot: <span className="text-foreground">{metrics.altitudeOvershoot != null ? `${metrics.altitudeOvershoot.toFixed(1)}%` : '—'}</span></div>
+                                  <div>Pos RMSE: <span className="text-foreground">{metrics.positionRMSE.toFixed(3)} m</span></div>
+                                  <div>Att RMSE: <span className="text-foreground">{metrics.attitudeRMSE.toFixed(3)} rad</span></div>
+                                </CardContent>
+                              </Card>
+                            )}
                           </>
                         )}
                       </div>
@@ -565,11 +601,12 @@ export const DroneSimulationInterface: React.FC = () => {
                         <Card>
                           <CardHeader className="pb-2"><CardTitle className="text-xs">Physics</CardTitle></CardHeader>
                           <CardContent className="space-y-1 text-muted-foreground">
-                            <p>• 6DOF Newton-Euler dynamics with RK4 integration</p>
-                            <p>• Motor ESC first-order dynamics (configurable lag)</p>
+                            <p>• 6DOF Newton-Euler dynamics, <strong>quaternion attitude</strong> (no gimbal lock)</p>
+                            <p>• Pluggable integrators (RK4 / RK45 / semi-implicit)</p>
+                            <p>• Motor ESC first-order dynamics + <strong>LiPo battery model</strong> (voltage sag, flight time)</p>
                             <p>• Quadratic aerodynamic drag (body + wind-relative)</p>
-                            <p>• Dryden-style turbulence (colored noise, 0.5s time constant)</p>
-                            <p>• Ground collision with friction</p>
+                            <p>• Dryden-style turbulence — <strong>deterministic</strong> (seeded RNG, reproducible runs)</p>
+                            <p>• Ground collision; powered by the headless <strong>@flylab/core</strong> engine</p>
                           </CardContent>
                         </Card>
                         <Card>

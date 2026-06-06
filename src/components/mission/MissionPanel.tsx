@@ -188,7 +188,7 @@ export const MissionPanel: React.FC<MissionPanelProps> = ({
             <Button
               size="sm" className="flex-1 h-7 text-xs"
               disabled={!isSimRunning || totalWaypoints === 0}
-              onClick={() => { status === 'paused' ? planner.resume() : planner.start(); onMissionChange(); }}
+              onClick={() => { if (status === 'paused') { planner.resume(); } else { planner.start(); } onMissionChange(); }}
             >
               <Play className="h-3 w-3 mr-1" />
               {status === 'paused' ? 'Resume' : 'Start'}
