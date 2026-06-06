@@ -6,6 +6,7 @@
 
 import React, { useRef, useEffect, useCallback } from 'react';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DroneState } from '@/lib/physics/DroneModel';
 import { Waypoint, MissionState } from '@/lib/mission/WaypointPlanner';
 import { WindConfig } from '@/lib/physics/DroneModel';
@@ -56,13 +57,8 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     // Ground plane for raycasting
     groundPlane: THREE.Mesh;
     frameId?: number;
-    // Camera orbit state
-    orbitAngleX: number;
-    orbitAngleY: number;
-    orbitDistance: number;
-    isDragging: boolean;
-    prevMouse: { x: number; y: number };
-    // Camera follow target (smooth)
+    // Camera
+    controls: OrbitControls;
     followTarget: THREE.Vector3;
   }>();
 
@@ -212,6 +208,23 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
     const waypointGroup = new THREE.Group();
     scene.add(waypointGroup);
 
+    // Smooth, damped camera controls (orbit / zoom / pan). Wheel + drag are
+    // captured only over the canvas, so scrolling/clicking elsewhere on the
+    // page is unaffected — this resolves the canvas-vs-browser interaction.
+    camera.position.set(5, 4, 5);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.7;
+    controls.zoomSpeed = 0.9;
+    controls.panSpeed = 0.7;
+    controls.zoomToCursor = true;
+    controls.minDistance = 1.2;
+    controls.maxDistance = 40;
+    controls.maxPolarAngle = Math.PI * 0.495; // stay above the ground plane
+    controls.target.set(0, 1, 0);
+    controls.update();
+
     sceneDataRef.current = {
       scene, camera, renderer,
       droneGroup, propellers, spinRate: 0, envDispose,
@@ -219,44 +232,8 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
       waypointGroup, pathLine: null, windArrow: null,
       groundPlane,
       frameId: undefined,
-      orbitAngleX: 0.4, orbitAngleY: 0.8, orbitDistance: 10,
-      isDragging: false, prevMouse: { x: 0, y: 0 },
-      followTarget: new THREE.Vector3(0, 0, 0),
-    };
-
-    // ─── Mouse / Touch controls ───────────────────────────────────────
-    const updateOrbitCamera = () => {
-      const sd = sceneDataRef.current!;
-      const { camera: cam, orbitAngleX, orbitAngleY, orbitDistance, followTarget } = sd;
-      const target = cameraModeRef.current === 'follow' ? followTarget : new THREE.Vector3(0, 0, 0);
-      cam.position.set(
-        target.x + orbitDistance * Math.cos(orbitAngleY) * Math.cos(orbitAngleX),
-        target.y + orbitDistance * Math.sin(orbitAngleX),
-        target.z + orbitDistance * Math.sin(orbitAngleY) * Math.cos(orbitAngleX),
-      );
-      cam.lookAt(target);
-    };
-
-    const onMouseDown = (e: MouseEvent) => {
-      const sd = sceneDataRef.current!;
-      sd.isDragging = true;
-      sd.prevMouse = { x: e.clientX, y: e.clientY };
-    };
-    const onMouseMove = (e: MouseEvent) => {
-      const sd = sceneDataRef.current!;
-      if (!sd.isDragging) return;
-      const dx = e.clientX - sd.prevMouse.x;
-      const dy = e.clientY - sd.prevMouse.y;
-      sd.orbitAngleY += dx * 0.008;
-      sd.orbitAngleX = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, sd.orbitAngleX - dy * 0.008));
-      sd.prevMouse = { x: e.clientX, y: e.clientY };
-      if (cameraModeRef.current !== 'fpv') updateOrbitCamera();
-    };
-    const onMouseUp = () => { if (sceneDataRef.current) sceneDataRef.current.isDragging = false; };
-    const onWheel = (e: WheelEvent) => {
-      const sd = sceneDataRef.current!;
-      sd.orbitDistance = Math.max(1.5, Math.min(30, sd.orbitDistance + e.deltaY * 0.015));
-      if (cameraModeRef.current !== 'fpv') updateOrbitCamera();
+      controls,
+      followTarget: new THREE.Vector3(0, 1, 0),
     };
 
     // Click-to-place waypoint (raycasting against ground plane)
@@ -292,17 +269,12 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
       sd.renderer.setSize(w2, h2);
     };
 
-    renderer.domElement.addEventListener('mousedown', onMouseDown);
     renderer.domElement.addEventListener('mousedown', onMouseDownClick);
     renderer.domElement.addEventListener('mouseup', onMouseUpClick);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    renderer.domElement.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('resize', onResize);
 
-    updateOrbitCamera();
-
     // ─── Animation loop ───────────────────────────────────────────────
+    let wasFpv = false; // detect FPV→orbit transition to reframe the camera
     const animate = () => {
       const sd = sceneDataRef.current;
       if (!sd) return;
@@ -338,7 +310,9 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
       // Camera positioning based on mode
       const mode = cameraModeRef.current;
       if (mode === 'fpv' && state) {
-        // FPV: camera at drone nose, looking forward in drone's body frame
+        // FPV: camera at drone nose, looking forward in the drone's body frame.
+        sd.controls.enabled = false;
+        wasFpv = true;
         const pos = state.position;
         const ori = state.orientation;
         // Body-frame forward = +X in sim = (cos(yaw)*cos(pitch), sin(yaw)*cos(pitch), sin(pitch))
@@ -351,18 +325,19 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
         const lookTarget = new THREE.Vector3(pos.x + fwdX * 5, pos.z + fwdY * 5, pos.y + fwdZ * 5);
         cam.lookAt(lookTarget);
         cam.up.set(0, 1, 0);
-      } else if (mode === 'follow') {
-        const target2 = sd.followTarget;
-        const dist = sd.orbitDistance;
-        const aX = sd.orbitAngleX; const aY = sd.orbitAngleY;
-        cam.position.set(
-          target2.x + dist * Math.cos(aY) * Math.cos(aX),
-          target2.y + dist * Math.sin(aX),
-          target2.z + dist * Math.sin(aY) * Math.cos(aX),
-        );
-        cam.lookAt(target2);
+      } else {
+        // Orbit + follow both use the smooth, damped OrbitControls. In follow
+        // mode the orbit pivot tracks the drone so you circle it.
+        sd.controls.enabled = true;
+        if (wasFpv) {
+          // Reframe to a sensible orbit distance after leaving FPV.
+          const t = sd.controls.target;
+          cam.position.set(t.x + 5, t.y + 4, t.z + 5);
+          wasFpv = false;
+        }
+        if (mode === 'follow') sd.controls.target.copy(sd.followTarget);
+        sd.controls.update();
       }
-      // 'orbit' mode camera updated by mouse events only
 
       // Spin propellers: ramp RPM up while flying, decay when idle. At high
       // RPM the blades fade and the motion-blur disc fades in (like a real prop).
@@ -386,12 +361,9 @@ export const DroneVisualization: React.FC<DroneVisualizationProps> = ({
       const sd = sceneDataRef.current;
       if (sd?.frameId) cancelAnimationFrame(sd.frameId);
       sd?.envDispose?.();
-      renderer.domElement.removeEventListener('mousedown', onMouseDown);
+      sd?.controls.dispose();
       renderer.domElement.removeEventListener('mousedown', onMouseDownClick);
       renderer.domElement.removeEventListener('mouseup', onMouseUpClick);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      renderer.domElement.removeEventListener('wheel', onWheel);
       window.removeEventListener('resize', onResize);
       if (mountRef.current) mountRef.current.removeChild(renderer.domElement);
       renderer.dispose();
