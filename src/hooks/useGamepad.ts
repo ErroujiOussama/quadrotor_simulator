@@ -8,70 +8,111 @@ function applyDeadzone(v: number): number {
   return (v - Math.sign(v) * DEAD_ZONE) / (1 - DEAD_ZONE);
 }
 
-export interface GamepadState {
-  connected: boolean;
-  id: string;
+/** Live axis/button snapshot, read every frame from a ref (no React re-render). */
+export interface GamepadSnapshot {
   axes: number[];
   buttons: boolean[];
 }
 
-/** Returns current gamepad state (polled). Call applyGamepadInputs separately. */
-export function useGamepad() {
-  const [state, setState] = useState<GamepadState>({ connected: false, id: '', axes: [], buttons: [] });
-  const frameRef = useRef<number>();
-
-  useEffect(() => {
-    const onConnect = (e: GamepadEvent) => {
-      setState(prev => ({ ...prev, connected: true, id: e.gamepad.id }));
-    };
-    const onDisconnect = () => {
-      setState({ connected: false, id: '', axes: [], buttons: [] });
-    };
-    window.addEventListener('gamepadconnected', onConnect);
-    window.addEventListener('gamepaddisconnected', onDisconnect);
-
-    const poll = () => {
-      const pads = navigator.getGamepads();
-      for (const pad of pads) {
-        if (pad) {
-          setState({
-            connected: true,
-            id: pad.id,
-            axes: Array.from(pad.axes),
-            buttons: Array.from(pad.buttons).map(b => b.pressed),
-          });
-          break;
-        }
-      }
-      frameRef.current = requestAnimationFrame(poll);
-    };
-    frameRef.current = requestAnimationFrame(poll);
-
-    return () => {
-      window.removeEventListener('gamepadconnected', onConnect);
-      window.removeEventListener('gamepaddisconnected', onDisconnect);
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    };
-  }, []);
-
-  return state;
+export interface UseGamepad {
+  /** True when any controller is connected. (React state — changes rarely.) */
+  connected: boolean;
+  /** Controller name (e.g. "DualShock 4", "Xbox Controller"). */
+  id: string;
+  /** Live snapshot ref — poll this in your animation loop. */
+  snapshotRef: React.MutableRefObject<GamepadSnapshot>;
 }
 
 /**
- * Map gamepad axes to ManualInputs.
- * Standard mapping (Xbox / generic):
- *   Axis 0 = Left stick X (yaw)
- *   Axis 1 = Left stick Y (throttle, inverted)
- *   Axis 2 = Right stick X (roll)
- *   Axis 3 = Right stick Y (pitch, inverted)
+ * Standard Gamepad-API button indices. PS4 (DualShock/DualSense) and Xbox both
+ * report the "standard" mapping in modern browsers, so these line up.
  */
-export function applyGamepadInputs(gamepad: GamepadState, current: ManualInputs): ManualInputs {
-  if (!gamepad.connected || gamepad.axes.length < 4) return current;
-  const axes = gamepad.axes;
+export const GP = {
+  CROSS: 0, A: 0,
+  CIRCLE: 1, B: 1,
+  SQUARE: 2, X: 2,
+  TRIANGLE: 3, Y: 3,
+  L1: 4, R1: 5, L2: 6, R2: 7,
+  SHARE: 8, OPTIONS: 9, START: 9,
+  L3: 10, R3: 11,
+  DPAD_UP: 12, DPAD_DOWN: 13, DPAD_LEFT: 14, DPAD_RIGHT: 15,
+  PS: 16,
+} as const;
+
+/**
+ * Detects any connected controller (PS4/PS5/Xbox/generic) via the Gamepad API.
+ * Axes/buttons live in a ref updated each animation frame; only connected/id are
+ * React state, so a steady stream of stick movement does NOT re-render the app.
+ */
+export function useGamepad(): UseGamepad {
+  const [info, setInfo] = useState<{ connected: boolean; id: string; index: number }>({
+    connected: false, id: '', index: -1,
+  });
+  const snapshotRef = useRef<GamepadSnapshot>({ axes: [], buttons: [] });
+  const rafRef = useRef<number>();
+
+  useEffect(() => {
+    const poll = () => {
+      const pads = navigator.getGamepads();
+      let active: Gamepad | null = null;
+      for (const p of pads) { if (p) { active = p; break; } }
+
+      if (active) {
+        snapshotRef.current = {
+          axes: Array.from(active.axes),
+          buttons: Array.from(active.buttons, (b) => b.pressed),
+        };
+        setInfo((prev) =>
+          prev.connected && prev.index === active!.index && prev.id === active!.id
+            ? prev
+            : { connected: true, id: active!.id, index: active!.index },
+        );
+      } else {
+        if (snapshotRef.current.axes.length || snapshotRef.current.buttons.length) {
+          snapshotRef.current = { axes: [], buttons: [] };
+        }
+        setInfo((prev) => (prev.connected ? { connected: false, id: '', index: -1 } : prev));
+      }
+      rafRef.current = requestAnimationFrame(poll);
+    };
+    rafRef.current = requestAnimationFrame(poll);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, []);
+
+  return { connected: info.connected, id: info.id, snapshotRef };
+}
+
+/**
+ * Map gamepad sticks to ManualInputs (Mode-2 RC layout):
+ *   Left stick  → yaw (X), throttle (Y, inverted)
+ *   Right stick → roll (X), pitch (Y, inverted)
+ */
+export function applyGamepadInputs(snap: GamepadSnapshot, current: ManualInputs): ManualInputs {
+  const axes = snap.axes;
+  if (axes.length < 4) return current;
   return {
     yaw:      applyDeadzone(axes[0] ?? 0),
     throttle: 0.5 - applyDeadzone(axes[1] ?? 0) * 0.5,
     roll:     applyDeadzone(axes[2] ?? 0),
     pitch:    -applyDeadzone(axes[3] ?? 0),
   };
+}
+
+/** Returns indices of buttons that went from up→down since `prev`. */
+export function buttonEdges(snap: GamepadSnapshot, prev: boolean[]): number[] {
+  const edges: number[] = [];
+  for (let i = 0; i < snap.buttons.length; i++) {
+    if (snap.buttons[i] && !prev[i]) edges.push(i);
+  }
+  return edges;
+}
+
+/** Short label for a known controller id. */
+export function controllerLabel(id: string): string {
+  const s = id.toLowerCase();
+  if (s.includes('dualsense') || s.includes('0ce6')) return 'PS5 DualSense';
+  if (s.includes('dualshock') || s.includes('054c') || s.includes('09cc') || s.includes('05c4')) return 'PS4 DualShock';
+  if (s.includes('xbox') || s.includes('xinput') || s.includes('045e')) return 'Xbox Controller';
+  // Gamepad ids are often "Name (Vendor: xxxx Product: yyyy)" — keep the name part.
+  return id.split('(')[0].trim() || 'Controller';
 }

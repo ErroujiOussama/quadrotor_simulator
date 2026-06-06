@@ -30,7 +30,7 @@ import {
 } from '@/components/ui/command';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useKeyboard, applyKeyboardInputs } from '@/hooks/useKeyboard';
-import { useGamepad, applyGamepadInputs } from '@/hooks/useGamepad';
+import { useGamepad, applyGamepadInputs, buttonEdges, GP, controllerLabel } from '@/hooks/useGamepad';
 import { createWaypoint } from '@/lib/mission/WaypointPlanner';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import {
@@ -76,6 +76,8 @@ export const DroneSimulationInterface: React.FC = () => {
   const stateRef = useRef<DroneState | null>(null);
   const manualInputsRef = useRef<ManualInputs>({ pitch: 0, roll: 0, yaw: 0, throttle: 0.5 });
   const inputPollRef = useRef<number>();
+  // Gamepad button actions, kept fresh each render so the poll loop isn't stale.
+  const padActionsRef = useRef<{ togglePlay: () => void; reset: () => void; cycleCamera: () => void; setMode: (m: FlightMode) => void } | null>(null);
 
   // ─── React state (30 Hz from simulator callback) ───────────────────
   const [currentData, setCurrentData] = useState<SimulationData | null>(null);
@@ -124,7 +126,7 @@ export const DroneSimulationInterface: React.FC = () => {
 
   // ─── Input hooks ───────────────────────────────────────────────────
   const { keysPressedRef, isActive: keyboardActive } = useKeyboard();
-  const gamepadState = useGamepad();
+  const gamepad = useGamepad();
 
   // ─── Initialize simulator ──────────────────────────────────────────
   useEffect(() => {
@@ -160,6 +162,7 @@ export const DroneSimulationInterface: React.FC = () => {
   // ─── Input polling loop (keyboard + gamepad → simulator) ───────────
   useEffect(() => {
     let lastTime = performance.now();
+    let prevButtons: boolean[] = [];
 
     const poll = (now: number) => {
       const dt = Math.min((now - lastTime) / 1000, 0.1);
@@ -168,6 +171,29 @@ export const DroneSimulationInterface: React.FC = () => {
       const sim = simulatorRef.current;
       if (!sim) { inputPollRef.current = requestAnimationFrame(poll); return; }
 
+      const snap = gamepad.snapshotRef.current;
+      const hasPadAxes = snap.axes.length >= 4;
+
+      // Gamepad button actions — work in ANY flight mode (edge-triggered).
+      if (snap.buttons.length) {
+        const act = padActionsRef.current;
+        for (const b of buttonEdges(snap, prevButtons)) {
+          if (!act) break;
+          if (b === GP.OPTIONS) act.togglePlay();          // Options/Start → start/pause
+          else if (b === GP.SHARE) act.reset();            // Share → reset
+          else if (b === GP.TRIANGLE) act.cycleCamera();   // Triangle → camera
+          else if (b === GP.R1 || b === GP.L1) {           // shoulders → cycle flight mode
+            const cur = sim.getFlightMode();
+            const i = FLIGHT_MODES.findIndex(m => m.id === cur);
+            const n = FLIGHT_MODES.length;
+            const next = b === GP.R1 ? (i + 1) % n : (i - 1 + n) % n;
+            act.setMode(FLIGHT_MODES[next].id);
+          }
+        }
+        prevButtons = snap.buttons.slice();
+      }
+
+      // Stick → manual inputs only in pilot-controllable modes.
       const mode = sim.getFlightMode();
       if (mode === 'position_hold' || mode === 'mission') {
         inputPollRef.current = requestAnimationFrame(poll);
@@ -175,15 +201,12 @@ export const DroneSimulationInterface: React.FC = () => {
       }
 
       let inputs = { ...manualInputsRef.current };
-
-      // Gamepad takes priority over keyboard
-      if (gamepadState.connected) {
-        inputs = applyGamepadInputs(gamepadState, inputs);
+      if (hasPadAxes) {
+        inputs = applyGamepadInputs(snap, inputs); // gamepad takes priority over keyboard
       } else {
         inputs = applyKeyboardInputs(keysPressedRef.current, inputs, dt);
       }
 
-      // Only update if changed
       const prev = manualInputsRef.current;
       if (inputs.pitch !== prev.pitch || inputs.roll !== prev.roll || inputs.yaw !== prev.yaw || inputs.throttle !== prev.throttle) {
         manualInputsRef.current = inputs;
@@ -196,7 +219,7 @@ export const DroneSimulationInterface: React.FC = () => {
 
     inputPollRef.current = requestAnimationFrame(poll);
     return () => { if (inputPollRef.current) cancelAnimationFrame(inputPollRef.current); };
-  }, [gamepadState, keysPressedRef]);
+  }, [gamepad.snapshotRef, keysPressedRef]);
 
   // ─── FPS meter ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -325,6 +348,9 @@ export const DroneSimulationInterface: React.FC = () => {
     position: { x: 0, y: 0, z: 0 }, velocity: { x: 0, y: 0, z: 0 },
     orientation: { roll: 0, pitch: 0, yaw: 0 }, angularVelocity: { x: 0, y: 0, z: 0 },
   };
+
+  // Keep gamepad button actions pointing at the latest handlers (avoids stale closures).
+  padActionsRef.current = { togglePlay, reset: handleReset, cycleCamera, setMode: handleFlightModeChange };
 
   const sim = simulatorRef.current;
   const metrics = currentData ? sim?.getMetrics() : undefined;
@@ -545,8 +571,8 @@ export const DroneSimulationInterface: React.FC = () => {
                         flightMode={flightMode}
                         manualInputs={manualInputs}
                         keyboardActive={keyboardActive}
-                        gamepadConnected={gamepadState.connected}
-                        gamepadId={gamepadState.id}
+                        gamepadConnected={gamepad.connected}
+                        gamepadId={gamepad.connected ? controllerLabel(gamepad.id) : gamepad.id}
                         onFlightModeChange={handleFlightModeChange}
                         onManualInputsChange={handleManualInputsChange}
                         onResetInputs={handleResetManualInputs}
@@ -742,7 +768,7 @@ export const DroneSimulationInterface: React.FC = () => {
           <div className="ml-auto flex items-center gap-3">
             {wind.enabled && <span className="text-cyan-400"><Wind className="h-3 w-3 inline -mt-0.5 mr-0.5" />{wind.speed.toFixed(0)} m/s</span>}
             {failures.motorFailures.some(Boolean) && <span className="text-destructive">MOTOR FAIL</span>}
-            {gamepadState.connected && <span className="text-emerald-400">GAMEPAD</span>}
+            {gamepad.connected && <span className="text-emerald-400" title={gamepad.id}>🎮 {controllerLabel(gamepad.id)}</span>}
             {keyboardActive && <span className="text-primary">KEYS</span>}
             <span className="flex items-center gap-1 capitalize">{CAMERA_MODES.find(c => c.id === cameraMode)?.icon}{cameraMode}</span>
           </div>
@@ -808,6 +834,14 @@ export const DroneSimulationInterface: React.FC = () => {
               ['Pitch / Roll', 'W A S D  ·  Arrows'],
               ['Yaw', 'Q / E'],
               ['Throttle up / down', 'Space / Shift'],
+            ]} />
+            <ShortcutGroup title="Controller (PS4 / Xbox / generic — auto-detected)" rows={[
+              ['Throttle / Yaw', 'Left stick'],
+              ['Pitch / Roll', 'Right stick'],
+              ['Start / Pause', 'Options'],
+              ['Reset', 'Share'],
+              ['Cycle camera', 'Triangle / Y'],
+              ['Flight mode −/+', 'L1 / R1'],
             ]} />
           </div>
         </DialogContent>
