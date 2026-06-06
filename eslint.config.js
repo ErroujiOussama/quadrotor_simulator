@@ -25,5 +25,27 @@ export default tseslint.config(
       ],
       "@typescript-eslint/no-unused-vars": "off",
     },
+  },
+  {
+    // Constitution P3: the headless engine (@flylab/core) must not import the UI
+    // or any browser-rendering library. This boundary is enforced in CI.
+    files: ["src/core/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "react", "react-dom", "react/*", "three", "three/*",
+                "@/components/*", "@/hooks/*", "@/pages/*", "@/App", "@/main",
+              ],
+              message:
+                "src/core must stay headless (constitution P3): no React/Three.js/UI imports.",
+            },
+          ],
+        },
+      ],
+    },
   }
 );
