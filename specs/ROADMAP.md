@@ -1,53 +1,62 @@
 # FlyLab Roadmap
 
-Spec-driven phases. Each feature folder under `specs/` carries its own
-`spec.md` / `plan.md` / `tasks.md`. This file is the index and the why-in-order.
+**FlyLab is a browser-native robotics drone simulation laboratory** — for control,
+autonomy, mission planning, and education. Not a flight *game*: a robotics *lab*.
 
-## Phase 0 — OSS foundation (in progress)
-License, contribution docs, package identity, README, CI, test infra, spec-kit
-scaffold. Unblocks everything; no product behavior change.
+The gap it fills: serious drone simulators (Gazebo+PX4, AirSim, Flightmare,
+gym-pybullet-drones, Webots, Isaac/Pegasus) are powerful but heavy, desktop-bound,
+and hard to start; browser drone sims are usually toys. FlyLab's edge is
+**robotics-first + browser-first + experiment-first + autonomy-first**: open a tab,
+run a real experiment, score it, share it by URL.
 
-## Phase 1 — Core engine refactor  → `specs/001-core-engine/`
-The foundation everything builds on.
-- Headless, framework-agnostic `@flylab/core` (runs in browser, Worker, Node).
-- Quaternion attitude (kill gimbal lock); Euler for display only.
-- Seeded deterministic RNG; record/replay-ready.
-- Pluggable integrators (RK4, adaptive RK45, semi-implicit).
-- Battery / powertrain model → flight-time & range.
-- Physics **validation** test suite (hover, free-fall, energy, settling).
-- Web Worker sim loop with typed message protocol.
+Spec-driven (see `.specify/`). Each feature folder carries `spec.md` / `plan.md` /
+`tasks.md`.
 
-## Phase 2 — Fidelity & extensibility  → `specs/002-…`, `003-…`
-- Plugin system: `Vehicle` / `Controller` / `Sensor` / `Integrator` / `Scenario`.
-- Airframes: quad (X/+/H), hexa, octo, Y6, tricopter, fixed-wing, VTOL, heli.
-- Custom frame builder → auto inertia tensor.
-- Blade-element prop aero, ground effect, vortex-ring, translational lift.
-- Sensor suite (IMU/GPS/baro/mag/rangefinder/optical-flow/cameras) with
-  realistic noise, bias, latency; EKF / complementary / UKF estimation.
-- Slung loads, tethers, payloads.
+## Shipped
+- **000 — OSS + spec-kit foundation** (license, CI, tests, constitution).
+- **001 — Core engine** `@flylab/core`: headless, deterministic, quaternion 6DOF,
+  RK4/RK45/semi-implicit, battery, Web Worker, validation suite.
+- **002 — Vehicle plugins & multi-airframe**: `Vehicle` interface, RotorCraft,
+  quad-X/+, hexa-X, octo-X — physics → control → telemetry → UI → 3D model.
+- **003 — Sensors & estimation (display)**: IMU/GPS/baro/mag + Mahony+KF estimator;
+  estimated-vs-true error in telemetry; "EKF" toggle.
 
-## Phase 3 — Advanced control  → `specs/004-…`
-- Controllers: cascaded quaternion attitude, LQR, geometric SE(3), MPC, INDI.
-- Controller Lab: side-by-side compare, step/Bode/Nyquist, pole-zero,
-  auto-tune, stability margins, real rise/settling/overshoot metrics.
-- System identification (chirp/PRBS → fitted model).
+## Next — make it feel like a robotics lab
+- **004 — Experiment & scoring lab**  → `specs/004-experiment-lab/`
+  Predefined experiments (hover stability, step response, trajectory tracking,
+  wind rejection, motor-failure recovery, sensor-noise robustness, waypoint
+  mission) that each emit a **scorecard** (position RMSE, overshoot, settling,
+  energy, max tilt, control effort, crashed/completed, 0–100 score). Headless +
+  reproducible. This is what turns a simulator into a lab.
+- **005 — Scenario editor**: obstacles, gates, landing pads, no-fly/wind/sensor-
+  denied zones, moving targets; collisions; save/load scenarios as JSON; share by URL.
+- **006 — Controller playground**: swappable controllers (PID, cascaded, LQR,
+  geometric SE(3), **user-defined JavaScript controller**) + side-by-side compare
+  with step/Bode/settling analysis.
 
-## Phase 4 — World & UX  → `specs/005-…`
-- react-three-fiber + drei scene engine; GLTF assets; PBR; sky/sun; post-fx.
-- Scenario editor: obstacles, FPV gates, buildings, terrain (DEM), OSM→3D city.
-- Multi-drone & swarm; formation flight; inter-drone collision.
-- VR/WebXR; cinematic camera; RC via WebHID/WebUSB; race layer + leaderboards.
+## Then — useful for robotics students & researchers
+- **007 — Robotics topic abstraction & API**: ROS2-style channels
+  (`/state /imu /gps /baro /camera /cmd` …) + a scriptable JS task API
+  (hover, tracking, formation, avoidance, landing); flight-log **replay** +
+  run comparison; export CSV/JSON/ROSbag-like.
+- **008 — Error-state EKF**: gyro-bias error-state filter → unlock closed-loop
+  fly-on-estimate (deferred from 003).
+- **009 — Perception sensors & tasks**: depth/down camera, optical flow,
+  rangefinder/LiDAR-lite, AprilTag/ArUco landing marker; visual-servo tasks.
 
-## Phase 5 — Data & API  → `specs/006-…`
-- Scriptable JS/TS API + in-app console; Python via Pyodide.
-- Flight-log recorder + scrubbable replay; run comparison overlay.
-- Import Betaflight/PX4 ULog; export CSV/JSON/Parquet; QGC `.plan`, KML/GPX.
-- Save/load projects (JSON); shareable permalinks; embeddable widget.
+## Then — respected by drone people
+- **010 — MAVLink**: message visualization → QGroundColor `.plan` import/export →
+  PX4/ArduPilot SITL via a WebSocket bridge.
+- **011 — Multi-drone & swarm**: formation, collision avoidance, leader-follower,
+  coverage/search.
 
-## Phase 6 — Learning platform  → `specs/007-…`
-- Guided interactive tutorials; courses; auto-graded challenges; badges.
-- KaTeX theory panels coupled to live state; classroom/instructor mode.
+## Research-grade
+- **012 — RL/Gym-like API**, WebGPU/WASM acceleration, dataset/replay export,
+  classroom/lab mode (instructor assignments), plugin registry.
+- **Validation page**: equations, assumptions, model docs, standard tests &
+  expected behavior — scientifically defensible.
 
-## Phase 7 — Interop  → `specs/008-…`
-- MAVLink bridge; PX4 / ArduPilot SITL (WASM or WebSocket); QGroundControl.
-- Plugin registry / marketplace for community vehicles, controllers, scenarios.
+## Principle
+Do not chase photorealism first (AirSim/Isaac/MSFS win there). Win on
+accessibility + robotics workflow: experiments, scoring, controllers, autonomy,
+and interoperability — all in a browser tab.

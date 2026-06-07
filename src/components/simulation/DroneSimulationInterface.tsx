@@ -19,6 +19,7 @@ import { ControlPanel } from '../controls/ControlPanel';
 import { ManualControlPanel } from '../controls/ManualControlPanel';
 import { MissionPanel } from '../mission/MissionPanel';
 import { EnvironmentPanel } from '../environment/EnvironmentPanel';
+import { ExperimentPanel } from '../experiments/ExperimentPanel';
 import { FPVHud } from './FPVHud';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -36,10 +37,10 @@ import type { ImperativePanelHandle } from 'react-resizable-panels';
 import {
   Play, Pause, RotateCcw, Download, Zap, Wind, Gamepad2, Eye, Camera, Crosshair,
   Navigation, SlidersHorizontal, BatteryMedium, Command as CommandIcon, Keyboard,
-  Activity, Plane, Cpu, Gauge, ChevronDown, LocateFixed,
+  Activity, Plane, Cpu, Gauge, ChevronDown, LocateFixed, FlaskConical,
 } from 'lucide-react';
 
-type LeftSection = 'tune' | 'mission' | 'env' | 'rc';
+type LeftSection = 'tune' | 'mission' | 'env' | 'rc' | 'lab';
 
 const FLIGHT_MODES: { id: FlightMode; short: string; label: string }[] = [
   { id: 'manual', short: 'MAN', label: 'Manual' },
@@ -67,6 +68,7 @@ const RAIL: { id: LeftSection; icon: React.ReactNode; label: string }[] = [
   { id: 'mission', icon: <Navigation className="h-5 w-5" />, label: 'Mission Planner' },
   { id: 'env', icon: <Wind className="h-5 w-5" />, label: 'Environment & Faults' },
   { id: 'rc', icon: <Gamepad2 className="h-5 w-5" />, label: 'Manual / RC' },
+  { id: 'lab', icon: <FlaskConical className="h-5 w-5" />, label: 'Experiments' },
 ];
 
 const RAD2DEG = 180 / Math.PI;
@@ -601,6 +603,7 @@ export const DroneSimulationInterface: React.FC = () => {
                         onResetInputs={handleResetManualInputs}
                       />
                     )}
+                    {leftSection === 'lab' && <ExperimentPanel />}
                   </div>
                 </ScrollArea>
               </div>

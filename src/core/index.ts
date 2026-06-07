@@ -85,6 +85,11 @@ export type { SensorConfig, ImuReading } from "./sensors/Sensors";
 export { StateEstimator, DEFAULT_ESTIMATOR_CONFIG } from "./estimation/StateEstimator";
 export type { EstimatorConfig } from "./estimation/StateEstimator";
 
+// Experiments & scoring
+export { runExperiment, computeScorecard } from "./experiments/Experiment";
+export type { ExperimentSpec, ExperimentResult, ExperimentEvent, Scorecard } from "./experiments/Experiment";
+export { EXPERIMENTS } from "./experiments/presets";
+
 // Simulation
 export { Simulation } from "./sim/Simulation";
 export type { SimulationOptions } from "./sim/Simulation";
